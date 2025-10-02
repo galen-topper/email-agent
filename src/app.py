@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException, Depends, Query, Cookie, Response, Re
 from fastapi.responses import HTMLResponse, FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, and_, or_
 from sqlalchemy.orm import sessionmaker, Session
 from typing import List, Optional
 import logging

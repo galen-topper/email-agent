@@ -587,6 +587,35 @@ body {
     }
 }
 
+/* Bottom-left Status Area */
+.bottom-left-status {
+    position: fixed;
+    bottom: 24px;
+    left: 24px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    background: var(--bg-secondary);
+    padding: 12px 16px;
+    border-radius: 12px;
+    border: 1px solid var(--border);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    z-index: 900;
+    transition: all 0.3s ease;
+}
+
+.bottom-left-status:hover {
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+    border-color: var(--accent);
+}
+
+.status-label {
+    font-size: 13px;
+    color: var(--text-secondary);
+    font-weight: 500;
+    user-select: none;
+}
+
 /* Reclassify Button */
 .reclassify-button svg {
     transition: transform 0.5s ease;
@@ -598,6 +627,11 @@ body {
 
 .reclassify-button.reclassifying svg {
     animation: pulse 1.5s ease-in-out infinite;
+}
+
+.reclassify-button.reclassifying {
+    background: var(--accent);
+    color: white;
 }
 
 /* Configuration Steps */
@@ -825,6 +859,16 @@ body {
     transform: translateY(-2px) scale(1.05);
     box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4);
     border-color: #4facfe;
+}
+
+/* Settings Icon (idle state) */
+.settings-icon {
+    color: var(--accent);
+    transition: transform 0.3s ease;
+}
+
+.background-indicator:hover .settings-icon {
+    transform: rotate(90deg);
 }
 
 /* Circular Progress Ring */

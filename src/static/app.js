@@ -14,6 +14,9 @@ loadStats();
 loadInbox();
 checkBackgroundProcessing();
 
+// Show permanent indicator in bottom-left for accessing actions
+showPermanentIndicator();
+
 // Start automatic syncing every 5 minutes
 startAutoSync();
 
@@ -568,6 +571,7 @@ async function checkConfiguration() {
 
 async function reclassifyAllEmails() {
     const button = event?.target?.closest('.reclassify-button');
+    const statusLabel = document.querySelector('.status-label');
     
     // Confirm action
     if (!confirm('This will reclassify ALL emails with updated aggressive spam detection rules. This may take 1-2 minutes. Continue?')) {
@@ -577,6 +581,10 @@ async function reclassifyAllEmails() {
     if (button) {
         button.disabled = true;
         button.classList.add('reclassifying');
+    }
+    
+    if (statusLabel) {
+        statusLabel.textContent = 'Reclassifying...';
     }
     
     showNotification('info', 'Reclassifying all emails... This may take a few minutes.');
@@ -594,6 +602,13 @@ async function reclassifyAllEmails() {
         if (data.status === 'success') {
             showNotification('success', `✅ Reclassified ${data.processed} emails! Many spam/promotional emails should now be filtered out. Refreshing...`);
             
+            if (statusLabel) {
+                statusLabel.textContent = `✅ Done (${data.processed})`;
+                setTimeout(() => {
+                    statusLabel.textContent = 'Reclassify';
+                }, 3000);
+            }
+            
             // Refresh the inbox after a brief delay
             setTimeout(() => {
                 loadInbox(currentFilter);
@@ -601,10 +616,16 @@ async function reclassifyAllEmails() {
             }, 2000);
         } else {
             showNotification('error', `Reclassification failed: ${data.message || 'Unknown error'}`);
+            if (statusLabel) {
+                statusLabel.textContent = 'Reclassify';
+            }
         }
     } catch (error) {
         console.error('Reclassify error:', error);
         showNotification('error', 'Reclassification failed. Please try again.');
+        if (statusLabel) {
+            statusLabel.textContent = 'Reclassify';
+        }
     } finally {
         if (button) {
             button.disabled = false;
@@ -953,11 +974,66 @@ function toggleBackgroundDetails() {
         details.classList.remove('visible');
     } else {
         details.classList.add('visible');
-        // Update with current status
+        // Try to update with current status, or show idle state
         checkBackgroundProcessing().then(() => {
             // Status will be updated by the check
+        }).catch(() => {
+            // No background processing - show idle state with reclassify button
+            showIdleBackgroundDetails();
         });
+        
+        // Also show idle state immediately if no processing
+        const indicator = document.getElementById('backgroundIndicator');
+        if (!indicator) {
+            showIdleBackgroundDetails();
+        }
     }
+}
+
+function showPermanentIndicator() {
+    let indicator = document.getElementById('backgroundIndicator');
+    
+    if (!indicator) {
+        indicator = document.createElement('div');
+        indicator.id = 'backgroundIndicator';
+        indicator.className = 'background-indicator';
+        indicator.onclick = toggleBackgroundDetails;
+        indicator.title = 'Click for email actions';
+        document.body.appendChild(indicator);
+    }
+    
+    // Show a static icon (gear/settings icon) when idle
+    indicator.innerHTML = `
+        <svg class="settings-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="3"></circle>
+            <path d="M12 1v6m0 6v6m-9-9h6m6 0h6m-4.5-7.5l-3 3m-6 0l-3 3m0 9l3-3m9 0l3 3"></path>
+        </svg>
+    `;
+}
+
+function showIdleBackgroundDetails() {
+    const details = document.getElementById('backgroundDetails');
+    if (!details) return;
+    
+    details.innerHTML = `
+        <div class="details-header">
+            <div class="details-title">Email Actions</div>
+            <button class="details-close" onclick="toggleBackgroundDetails()">×</button>
+        </div>
+        <div class="details-content">
+            <div class="details-info">
+                Quick actions for managing your emails.
+            </div>
+            <div style="margin-top: 16px; display: flex; flex-direction: column; gap: 8px;">
+                <button class="btn btn-primary" onclick="reclassifyAllEmails()" style="width: 100%;">
+                    ⚡ Reclassify All Emails
+                </button>
+                <div style="font-size: 12px; color: var(--text-secondary); margin-top: 8px; line-height: 1.5;">
+                    Reclassify all emails with updated aggressive spam detection rules. This will move promotional and fundraising emails to spam.
+                </div>
+            </div>
+        </div>
+    `;
 }
 
 function updateBackgroundDetails(status) {
@@ -989,9 +1065,14 @@ function updateBackgroundDetails(status) {
             <div class="details-info">
                 Your inbox is being processed in the background. New emails will appear automatically as they're ready.
             </div>
-            <button class="btn" onclick="cancelBackgroundSync()" style="margin-top: 16px; width: 100%;">
-                Cancel Sync
-            </button>
+            <div style="margin-top: 16px; display: flex; flex-direction: column; gap: 8px;">
+                <button class="btn" onclick="cancelBackgroundSync()" style="width: 100%;">
+                    Cancel Sync
+                </button>
+                <button class="btn btn-secondary" onclick="reclassifyAllEmails()" style="width: 100%;">
+                    ⚡ Reclassify All Emails
+                </button>
+            </div>
         </div>
     `;
 }
