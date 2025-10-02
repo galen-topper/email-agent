@@ -12,7 +12,7 @@ from pathlib import Path
 from .config import settings
 from .models import Base, Email, Inference, Draft, User, ComposedDraft
 from .imap_client import fetch_unseen_emails
-from .pipeline import process_email, process_new_emails, get_email_with_inferences
+from .pipeline import process_email, process_new_emails, get_email_with_inferences, summarize_pending_emails
 from .smtp_client import send_reply
 from .utils import save_email_to_db, get_email_stats, format_email_for_display
 from . import auth
@@ -526,8 +526,8 @@ def manual_poll(current_user: User = Depends(require_auth), db: Session = Depend
             
             fetched_emails = fetch_user_emails(current_user, save_callback, max_results=20)
             
-            # Process just enough to get ~20 non-spam emails for display
-            processed_count = process_new_emails(db, target_non_spam=20)
+            # Process just enough to get ~20 non-spam emails for display (classification only)
+            processed_count = process_new_emails(db, target_non_spam=20, classify_only=True)
             
             # Start background thread to fetch and process more emails
             def background_fetch():
@@ -553,8 +553,11 @@ def manual_poll(current_user: User = Depends(require_auth), db: Session = Depend
                         logger.info("Background sync cancelled by user before processing")
                         return
                     
-                    bg_processed = process_new_emails(bg_db)
-                    logger.info(f"Background processing completed - processed {bg_processed} emails")
+                    # First, classify-only for any remaining
+                    bg_classified = process_new_emails(bg_db, classify_only=True)
+                    # Then, run background summarization for non-spam
+                    bg_summarized = summarize_pending_emails(bg_db)
+                    logger.info(f"Background processing completed - classified {bg_classified}, summarized {bg_summarized}")
                     
                 except Exception as e:
                     logger.error(f"Background fetch error: {e}")

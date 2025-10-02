@@ -569,14 +569,21 @@ async function checkConfiguration() {
     return false;
 }
 
-async function reclassifyAllEmails() {
+function reclassifyAllEmails() {
+    // Show custom confirmation modal
+    showConfirmDialog(
+        'Reclassify All Emails',
+        'This will reclassify ALL emails with updated aggressive spam detection rules. This may take 1-2 minutes.',
+        async () => {
+            // User confirmed - proceed with reclassification
+            await performReclassification();
+        }
+    );
+}
+
+async function performReclassification() {
     const button = event?.target?.closest('.reclassify-button');
     const statusLabel = document.querySelector('.status-label');
-    
-    // Confirm action
-    if (!confirm('This will reclassify ALL emails with updated aggressive spam detection rules. This may take 1-2 minutes. Continue?')) {
-        return;
-    }
     
     if (button) {
         button.disabled = true;
@@ -1643,4 +1650,76 @@ async function deleteEmail(emailId) {
     // TODO: Implement delete functionality
     showNotification('info', 'Delete functionality coming soon');
     document.querySelector('.modal-overlay')?.remove();
+}
+
+// Show custom confirmation dialog
+function showConfirmDialog(title, message, onConfirm) {
+    // Remove any existing confirm dialogs
+    const existing = document.querySelector('.confirm-dialog-overlay');
+    if (existing) existing.remove();
+    
+    // Create overlay
+    const overlay = document.createElement('div');
+    overlay.className = 'confirm-dialog-overlay';
+    overlay.onclick = () => closeConfirmDialog();
+    
+    // Create dialog
+    const dialog = document.createElement('div');
+    dialog.className = 'confirm-dialog';
+    dialog.onclick = (e) => e.stopPropagation();
+    
+    dialog.innerHTML = `
+        <div class="confirm-dialog-header">
+            <div class="confirm-dialog-icon">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="12" r="10"></circle>
+                    <line x1="12" y1="8" x2="12" y2="12"></line>
+                    <line x1="12" y1="16" x2="12.01" y2="16"></line>
+                </svg>
+            </div>
+            <div class="confirm-dialog-title">${title}</div>
+        </div>
+        <div class="confirm-dialog-body">
+            ${message}
+        </div>
+        <div class="confirm-dialog-actions">
+            <button class="btn-secondary" onclick="closeConfirmDialog()">Cancel</button>
+            <button class="btn-primary" onclick="confirmDialogAction()">Continue</button>
+        </div>
+    `;
+    
+    // Append to body
+    document.body.appendChild(overlay);
+    document.body.appendChild(dialog);
+    
+    // Store the callback
+    window._confirmDialogCallback = onConfirm;
+    
+    // Trigger animation
+    setTimeout(() => {
+        overlay.classList.add('active');
+        dialog.classList.add('active');
+    }, 10);
+}
+
+function closeConfirmDialog() {
+    const overlay = document.querySelector('.confirm-dialog-overlay');
+    const dialog = document.querySelector('.confirm-dialog');
+    
+    if (overlay) overlay.classList.remove('active');
+    if (dialog) dialog.classList.remove('active');
+    
+    setTimeout(() => {
+        if (overlay) overlay.remove();
+        if (dialog) dialog.remove();
+        delete window._confirmDialogCallback;
+    }, 300);
+}
+
+function confirmDialogAction() {
+    const callback = window._confirmDialogCallback;
+    closeConfirmDialog();
+    if (callback) {
+        callback();
+    }
 }
