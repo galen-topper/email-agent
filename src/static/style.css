@@ -1043,8 +1043,44 @@ body {
 }
 
 /* Compose Modal */
+/* Compose Slide-in Panel */
 .compose-modal {
-    max-width: 700px;
+    position: fixed;
+    top: 0;
+    right: 0;
+    height: 100vh;
+    width: 600px;
+    max-width: 90vw;
+    background: var(--bg-secondary);
+    border-left: 1px solid var(--border);
+    transform: translateX(100%);
+    transition: transform 0.3s ease-in-out;
+    z-index: 1000;
+    display: flex;
+    flex-direction: column;
+    box-shadow: -4px 0 20px rgba(0, 0, 0, 0.3);
+}
+
+.compose-modal.active {
+    transform: translateX(0);
+}
+
+.compose-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.3);
+    z-index: 999;
+    opacity: 0;
+    transition: opacity 0.3s ease-in-out;
+    pointer-events: none;
+}
+
+.compose-overlay.active {
+    opacity: 1;
+    pointer-events: auto;
 }
 
 .compose-field {

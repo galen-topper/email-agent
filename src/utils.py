@@ -17,7 +17,12 @@ def save_email_to_db(db: Session, email_data: Dict[str, Any]) -> Optional[Email]
         existing_email = db.query(Email).filter(Email.msg_id == email_data["msg_id"]).first()
         
         if existing_email:
-            logger.info(f"Email with msg_id {email_data['msg_id']} already exists, skipping")
+            # Update read status from Gmail if it has changed
+            gmail_is_read = email_data.get("is_read", existing_email.is_read)
+            if existing_email.is_read != gmail_is_read:
+                logger.info(f"Updating read status for email {email_data['msg_id']}: {existing_email.is_read} -> {gmail_is_read}")
+                existing_email.is_read = gmail_is_read
+                db.commit()
             return existing_email
         
         # Create new email record
@@ -31,6 +36,7 @@ def save_email_to_db(db: Session, email_data: Dict[str, Any]) -> Optional[Email]
             raw_path=email_data["raw_path"],
             received_at=email_data.get("received_at"),
             labels_json=email_data.get("labels_json", {}),
+            is_read=email_data.get("is_read", False),  # Sync read status from Gmail
             user_id=email_data.get("user_id")  # Set user_id from email_data
         )
         

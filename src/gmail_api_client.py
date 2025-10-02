@@ -84,6 +84,12 @@ def parse_gmail_message(message: dict, user_id: int) -> Dict[str, Any]:
             if date_str:
                 received_at = parse_date_header(date_str)
     
+    # Determine if email is read based on Gmail labels
+    # In Gmail, if 'UNREAD' label is present, email is unread
+    # If 'UNREAD' label is NOT present, email is read
+    labels = message.get('labelIds', [])
+    is_read = 'UNREAD' not in labels
+    
     return {
         'msg_id': message['id'],
         'thread_id': message['threadId'],
@@ -93,7 +99,8 @@ def parse_gmail_message(message: dict, user_id: int) -> Dict[str, Any]:
         'snippet': message.get('snippet', '')[:500],
         'raw_path': f"gmail_api_{message['id']}",  # Not storing raw for API messages
         'received_at': received_at,
-        'labels_json': {'labels': message.get('labelIds', [])},
+        'labels_json': {'labels': labels},
+        'is_read': is_read,  # Sync read status from Gmail
         'user_id': user_id
     }
 
@@ -266,3 +273,38 @@ def extract_email_addresses(header_value: str) -> List[tuple]:
     except Exception as e:
         logger.warning(f"Failed to parse email addresses from '{header_value}': {e}")
         return []
+
+
+def mark_email_as_read_in_gmail(user: User, msg_id: str, is_read: bool = True):
+    """Mark an email as read or unread in Gmail."""
+    try:
+        from googleapiclient.discovery import build
+        
+        # Get user's credentials
+        credentials = auth.get_user_credentials(user)
+        
+        # Build Gmail API service
+        service = build('gmail', 'v1', credentials=credentials)
+        
+        if is_read:
+            # Remove UNREAD label to mark as read
+            service.users().messages().modify(
+                userId='me',
+                id=msg_id,
+                body={'removeLabelIds': ['UNREAD']}
+            ).execute()
+            logger.info(f"Marked email {msg_id} as read in Gmail")
+        else:
+            # Add UNREAD label to mark as unread
+            service.users().messages().modify(
+                userId='me',
+                id=msg_id,
+                body={'addLabelIds': ['UNREAD']}
+            ).execute()
+            logger.info(f"Marked email {msg_id} as unread in Gmail")
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to update read status in Gmail for {msg_id}: {e}")
+        return False

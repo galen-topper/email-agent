@@ -754,7 +754,9 @@ def mark_email_read(
     current_user: User = Depends(require_auth),
     db: Session = Depends(get_db)
 ):
-    """Mark an email as read or unread."""
+    """Mark an email as read or unread (syncs with Gmail)."""
+    from . import gmail_api_client
+    
     try:
         email = db.query(Email).filter(
             Email.id == email_id,
@@ -765,8 +767,13 @@ def mark_email_read(
             raise HTTPException(status_code=404, detail="Email not found")
         
         is_read = read_status.get('is_read', True)
+        
+        # Update in local database
         email.is_read = is_read
         db.commit()
+        
+        # Sync with Gmail (mark as read/unread there too)
+        gmail_api_client.mark_email_as_read_in_gmail(current_user, email.msg_id, is_read)
         
         return {"status": "success", "is_read": is_read}
         
