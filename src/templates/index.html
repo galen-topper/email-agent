@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>AgentMail</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="header">
+        <div class="header-left">
+            <div class="logo">
+                Agent<span class="logo-accent">Mail</span>
+            </div>
+            <button class="btn-icon sync-button" onclick="pollEmails()" title="Sync">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
+                </svg>
+            </button>
+        </div>
+        <div class="header-actions">
+            <div class="stats" id="stats"></div>
+            <button class="btn btn-primary" onclick="composeEmail()">
+                Compose
+            </button>
+        </div>
+    </div>
+    
+    <div class="container">
+        <div class="sidebar">
+            <div class="sidebar-section">
+                <div class="sidebar-title">Views</div>
+                <div class="nav-item active" onclick="filterEmails(null, this)">
+                    <span>All Mail</span>
+                </div>
+                <div class="nav-item" onclick="filterEmails('needs_reply', this)">
+                    <span>Needs Reply</span>
+                </div>
+                <div class="nav-item" onclick="filterEmails('high', this)">
+                    <span>High Priority</span>
+                </div>
+            </div>
+            <div class="sidebar-section">
+                <div class="sidebar-title">Filters</div>
+                <div class="nav-item" onclick="filterEmails('normal', this)">
+                    <span>Normal</span>
+                </div>
+                <div class="nav-item" onclick="filterEmails('low', this)">
+                    <span>Low Priority</span>
+                </div>
+            </div>
+            
+            <div class="nav-section">
+                <div class="sidebar-title">More</div>
+                <div class="nav-item" onclick="loadDrafts(this)">
+                    <span>Drafts</span>
+                </div>
+                <div class="nav-item" onclick="loadSent(this)">
+                    <span>Sent</span>
+                </div>
+                <div class="nav-item" onclick="loadSpam(this)">
+                    <span>Spam</span>
+                </div>
+                <div class="nav-item" onclick="loadTrash(this)">
+                    <span>Trash</span>
+                </div>
+            </div>
+        </div>
+        
+        <div class="main">
+            <div class="toolbar">
+                <div class="search-box">
+                    <input type="text" class="search-input" placeholder="Search emails..." id="searchInput" onkeyup="searchEmails()">
+                </div>
+            </div>
+            
+            <div class="email-list" id="emailList">
+                <div class="loading">
+                    <div class="spinner"></div>
+                    <div>Loading emails...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script src="/static/app.js"></script>
+</body>
+</html>
