@@ -23,7 +23,8 @@ def save_email_to_db(db: Session, email_data: Dict[str, Any]) -> Optional[Email]
                 logger.info(f"Updating read status for email {email_data['msg_id']}: {existing_email.is_read} -> {gmail_is_read}")
                 existing_email.is_read = gmail_is_read
                 db.commit()
-            return existing_email
+            # Return None to signal this email already existed
+            return None
         
         # Create new email record
         email = Email(

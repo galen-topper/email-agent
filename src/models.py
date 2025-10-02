@@ -64,6 +64,7 @@ class ComposedDraft(Base):
     __tablename__ = "composed_drafts"
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    gmail_draft_id = Column(String, nullable=True)  # Gmail draft ID for syncing
     to_addr = Column(Text, nullable=False)  # Can be multiple, comma-separated
     cc_addr = Column(Text, nullable=True)
     bcc_addr = Column(Text, nullable=True)
@@ -76,3 +77,19 @@ class ComposedDraft(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     sent_at = Column(DateTime, nullable=True)  # NULL if not sent yet
     reply_to_email = relationship("Email", foreign_keys=[reply_to_email_id])
+
+class SpamFeedback(Base):
+    """User feedback on spam classification for ML training"""
+    __tablename__ = "spam_feedback"
+    id = Column(Integer, primary_key=True)
+    email_id = Column(Integer, ForeignKey("emails.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    is_spam = Column(Boolean, nullable=False)  # True = spam, False = not spam
+    feedback_at = Column(DateTime, default=datetime.utcnow)
+    # Store email features at time of feedback for training
+    from_domain = Column(String)
+    subject_length = Column(Integer)
+    body_length = Column(Integer)
+    has_links = Column(Boolean)
+    has_attachments = Column(Boolean)
+    llm_spam_score = Column(JSON)  # Store original LLM classification

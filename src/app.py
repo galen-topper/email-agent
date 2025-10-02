@@ -136,11 +136,12 @@ def get_inbox(
     # Filter emails by current user
     base_query = db.query(Email).filter(Email.user_id == current_user.id)
     
-    # Exclude spam emails from inbox by default
+    # Exclude spam emails from inbox by default (but NOT potential spam)
     # Get all classifications and filter in Python (more reliable than JSON queries)
     all_classifications = db.query(Inference).filter(Inference.kind == "classification").all()
     spam_email_ids = [c.email_id for c in all_classifications if c.json and c.json.get('is_spam') == True]
     
+    # Don't exclude potential_spam from inbox - they stay visible with warning
     if spam_email_ids:
         base_query = base_query.filter(~Email.id.in_(spam_email_ids))
     
@@ -210,31 +211,43 @@ def get_inbox(
 
 @app.get("/api/spam")
 def get_spam(
+    spam_type: str = Query("spam", description="Type: spam or potential_spam"),
     limit: int = Query(20, description="Number of emails per page (10, 20, 50, or 100)"),
     offset: int = Query(0, description="Number of emails to skip (for pagination)"),
     current_user: User = Depends(require_auth),
     db: Session = Depends(get_db)
 ):
-    """Get spam emails with pagination (API endpoint, requires auth)."""
+    """Get spam or potential spam emails with pagination (API endpoint, requires auth)."""
     import logging
     logger = logging.getLogger(__name__)
     
     # Filter emails by current user
     base_query = db.query(Email).filter(Email.user_id == current_user.id)
     
-    # Get only spam emails
-    # Get all classifications and filter in Python (more reliable than JSON queries)
+    # Get classifications
     all_classifications = db.query(Inference).filter(Inference.kind == "classification").all()
-    spam_email_ids = [c.email_id for c in all_classifications if c.json and c.json.get('is_spam') == True]
     
-    logger.info(f"Found {len(spam_email_ids)} spam emails for user {current_user.id}")
-    logger.info(f"Spam email IDs: {spam_email_ids[:5]}...")  # Log first 5
+    # Filter by spam type
+    if spam_type == "potential_spam":
+        # Get emails marked as potential_spam
+        email_ids = [
+            c.email_id for c in all_classifications 
+            if c.json and c.json.get('spam_type') == 'potential_spam'
+        ]
+        logger.info(f"Found {len(email_ids)} potential spam emails for user {current_user.id}")
+    else:
+        # Get emails marked as spam (is_spam=True)
+        email_ids = [
+            c.email_id for c in all_classifications 
+            if c.json and c.json.get('is_spam') == True
+        ]
+        logger.info(f"Found {len(email_ids)} spam emails for user {current_user.id}")
     
-    if spam_email_ids:
-        base_query = base_query.filter(Email.id.in_(spam_email_ids))
+    if email_ids:
+        base_query = base_query.filter(Email.id.in_(email_ids))
     else:
         # No spam found, return empty result
-        logger.info("No spam emails found, returning empty result")
+        logger.info(f"No {spam_type} emails found, returning empty result")
         base_query = base_query.filter(Email.id == -1)
     
     # Get total count for pagination
@@ -491,7 +504,7 @@ background_sync_cancelled = {}
 
 @app.post("/api/poll")
 def manual_poll(current_user: User = Depends(require_auth), db: Session = Depends(get_db)):
-    """Manually trigger email fetch and processing - returns quickly with initial batch (requires auth)."""
+    """Smart sync - only fetches NEW emails and processes them quickly (requires auth)."""
     try:
         from .gmail_api_client import fetch_user_emails
         import threading
@@ -499,66 +512,108 @@ def manual_poll(current_user: User = Depends(require_auth), db: Session = Depend
         # Reset cancel flag for this user
         background_sync_cancelled[current_user.id] = False
         
-        # Fetch first batch quickly (20 emails)
-        def save_callback(email_data):
-            save_email_to_db(db, email_data)
+        # Check how many emails user already has
+        existing_count = db.query(Email).filter(Email.user_id == current_user.id).count()
         
-        fetched_emails = fetch_user_emails(current_user, save_callback, max_results=20)
+        logger.info(f"User {current_user.email} has {existing_count} emails in database")
         
-        # Process just enough to get ~20 non-spam emails for display
-        # This will stop early once we have 20 non-spam emails
-        processed_count = process_new_emails(db, target_non_spam=20)
-        
-        # Start background thread to fetch and process more emails
-        def background_fetch():
-            # Create new DB session for background thread
-            from sqlalchemy.orm import Session as SessionClass
-            bg_db = SessionClass(bind=db.get_bind())
+        if existing_count == 0:
+            # First sync - fetch initial batch (20 emails) and process quickly
+            logger.info("First sync detected - fetching initial 20 emails")
             
-            try:
-                import logging
-                logger = logging.getLogger(__name__)
-                logger.info("Background fetch started - fetching up to 480 more emails")
+            def save_callback(email_data):
+                save_email_to_db(db, email_data)
+            
+            fetched_emails = fetch_user_emails(current_user, save_callback, max_results=20)
+            
+            # Process just enough to get ~20 non-spam emails for display
+            processed_count = process_new_emails(db, target_non_spam=20)
+            
+            # Start background thread to fetch and process more emails
+            def background_fetch():
+                from sqlalchemy.orm import Session as SessionClass
+                bg_db = SessionClass(bind=db.get_bind())
                 
-                # Check if cancelled
-                if background_sync_cancelled.get(current_user.id, False):
-                    logger.info("Background sync cancelled by user")
-                    return
-                
-                # Fetch more emails in background (up to 480 more to reach 500 total)
-                def bg_save_callback(email_data):
+                try:
+                    logger.info("Background fetch started - fetching up to 480 more emails")
+                    
                     if background_sync_cancelled.get(current_user.id, False):
+                        logger.info("Background sync cancelled by user")
                         return
-                    save_email_to_db(bg_db, email_data)
+                    
+                    def bg_save_callback(email_data):
+                        if background_sync_cancelled.get(current_user.id, False):
+                            return
+                        save_email_to_db(bg_db, email_data)
+                    
+                    more_emails = fetch_user_emails(current_user, bg_save_callback, max_results=480)
+                    logger.info(f"Background fetch completed - fetched {len(more_emails)} more emails")
+                    
+                    if background_sync_cancelled.get(current_user.id, False):
+                        logger.info("Background sync cancelled by user before processing")
+                        return
+                    
+                    bg_processed = process_new_emails(bg_db)
+                    logger.info(f"Background processing completed - processed {bg_processed} emails")
+                    
+                except Exception as e:
+                    logger.error(f"Background fetch error: {e}")
+                finally:
+                    bg_db.close()
+            
+            thread = threading.Thread(target=background_fetch, daemon=True)
+            thread.start()
+            
+            return {
+                "status": "success",
+                "fetched": len(fetched_emails),
+                "processed": processed_count,
+                "background_processing": True,
+                "message": "First sync - fetching more in background",
+                "error": None
+            }
+        else:
+            # Regular sync - only fetch NEW emails (check first 50 for new ones)
+            logger.info("Regular sync - checking for new emails")
+            
+            new_email_count = 0
+            
+            def save_callback(email_data):
+                nonlocal new_email_count
+                email = save_email_to_db(db, email_data)
+                # save_email_to_db returns Email object if new, None if already exists
+                if email is not None:
+                    new_email_count += 1
+            
+            # Fetch only the 50 most recent emails from Gmail
+            # save_email_to_db will skip duplicates
+            fetched = fetch_user_emails(current_user, save_callback, max_results=50)
+            
+            logger.info(f"Checked 50 most recent emails, found {new_email_count} new emails")
+            
+            # Process ONLY the new emails quickly
+            if new_email_count > 0:
+                # Get the newest unprocessed emails
+                processed_count = process_new_emails(db, max_emails=new_email_count)
+                logger.info(f"Processed {processed_count} new emails")
                 
-                more_emails = fetch_user_emails(current_user, bg_save_callback, max_results=480)
-                logger.info(f"Background fetch completed - fetched {len(more_emails)} more emails")
-                
-                # Check if cancelled before processing
-                if background_sync_cancelled.get(current_user.id, False):
-                    logger.info("Background sync cancelled by user before processing")
-                    return
-                
-                # Process ALL additional emails in background (no limit)
-                bg_processed = process_new_emails(bg_db)  # No limits - process everything
-                logger.info(f"Background processing completed - processed {bg_processed} emails")
-                
-            except Exception as e:
-                logger.error(f"Background fetch error: {e}")
-            finally:
-                bg_db.close()
-        
-        # Start background thread
-        thread = threading.Thread(target=background_fetch, daemon=True)
-        thread.start()
-        
-        return {
-            "status": "success",
-            "fetched": len(fetched_emails),
-            "processed": processed_count,
-            "background_processing": True,
-            "error": None
-        }
+                return {
+                    "status": "success",
+                    "fetched": new_email_count,
+                    "processed": processed_count,
+                    "background_processing": False,
+                    "message": f"Found {new_email_count} new email(s)",
+                    "error": None
+                }
+            else:
+                return {
+                    "status": "success",
+                    "fetched": 0,
+                    "processed": 0,
+                    "background_processing": False,
+                    "message": "No new emails",
+                    "error": None
+                }
         
     except Exception as e:
         logger.error(f"Manual poll failed: {e}")
@@ -566,9 +621,9 @@ def manual_poll(current_user: User = Depends(require_auth), db: Session = Depend
         
         # Provide helpful error messages
         if "authentication" in error_msg.lower() or "login" in error_msg.lower():
-            error_msg = "Authentication failed. Check your email credentials in .env file."
+            error_msg = "Authentication failed. Please log out and log in again."
         elif "connection" in error_msg.lower() or "network" in error_msg.lower():
-            error_msg = "Connection failed. Check your internet connection and IMAP settings."
+            error_msg = "Connection failed. Check your internet connection."
         
         return {
             "status": "error",
@@ -658,15 +713,55 @@ def get_drafts(
     current_user: User = Depends(require_auth),
     db: Session = Depends(get_db)
 ):
-    """Get all unsent drafts for the current user."""
+    """Get all unsent drafts for the current user (includes Gmail drafts)."""
+    from . import gmail_api_client
+    
     try:
-        drafts = db.query(ComposedDraft).filter(
+        # Fetch local drafts from database
+        local_drafts = db.query(ComposedDraft).filter(
+            ComposedDraft.user_id == current_user.id,
+            ComposedDraft.sent_at.is_(None)
+        ).order_by(ComposedDraft.updated_at.desc()).all()
+        
+        # Fetch Gmail drafts
+        gmail_drafts = gmail_api_client.fetch_gmail_drafts(current_user)
+        
+        # Sync Gmail drafts into database (avoid duplicates by gmail_draft_id)
+        for gmail_draft in gmail_drafts:
+            gmail_draft_id = gmail_draft.get('gmail_draft_id')
+            
+            # Check if this Gmail draft already exists in our database
+            existing = db.query(ComposedDraft).filter(
+                ComposedDraft.user_id == current_user.id,
+                ComposedDraft.gmail_draft_id == gmail_draft_id
+            ).first()
+            
+            if not existing:
+                # Create new draft from Gmail
+                new_draft = ComposedDraft(
+                    user_id=current_user.id,
+                    gmail_draft_id=gmail_draft_id,
+                    to_addr=gmail_draft.get('to_addr', ''),
+                    cc_addr=gmail_draft.get('cc_addr'),
+                    bcc_addr=gmail_draft.get('bcc_addr'),
+                    subject=gmail_draft.get('subject', ''),
+                    body=gmail_draft.get('body', ''),
+                    is_reply=gmail_draft.get('is_reply', False),
+                    is_forward=gmail_draft.get('is_forward', False)
+                )
+                db.add(new_draft)
+                logger.info(f"Imported Gmail draft {gmail_draft_id} for user {current_user.email}")
+        
+        db.commit()
+        
+        # Re-fetch all drafts after sync
+        all_drafts = db.query(ComposedDraft).filter(
             ComposedDraft.user_id == current_user.id,
             ComposedDraft.sent_at.is_(None)
         ).order_by(ComposedDraft.updated_at.desc()).all()
         
         result = []
-        for draft in drafts:
+        for draft in all_drafts:
             result.append({
                 "id": draft.id,
                 "to": draft.to_addr,
@@ -677,6 +772,7 @@ def get_drafts(
                 "is_reply": draft.is_reply,
                 "is_forward": draft.is_forward,
                 "reply_to_email_id": draft.reply_to_email_id,
+                "gmail_draft_id": draft.gmail_draft_id,
                 "created_at": draft.created_at.isoformat() if draft.created_at else None,
                 "updated_at": draft.updated_at.isoformat() if draft.updated_at else None
             })
@@ -779,6 +875,129 @@ def mark_email_read(
         
     except Exception as e:
         logger.error(f"Failed to mark email as read: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/email/{email_id}/spam-feedback")
+def mark_spam_feedback(
+    email_id: int,
+    feedback_data: dict,
+    current_user: User = Depends(require_auth),
+    db: Session = Depends(get_db)
+):
+    """Record user feedback on spam classification for ML training."""
+    from .ml_spam_classifier import ml_classifier
+    from .models import SpamFeedback
+    
+    try:
+        email = db.query(Email).filter(
+            Email.id == email_id,
+            Email.user_id == current_user.id
+        ).first()
+        
+        if not email:
+            raise HTTPException(status_code=404, detail="Email not found")
+        
+        is_spam = feedback_data.get('is_spam', False)
+        
+        # Extract features for ML training
+        features = ml_classifier.extract_features(email, email.snippet)
+        
+        # Get current classification
+        classification_inference = db.query(Inference).filter(
+            and_(
+                Inference.email_id == email.id,
+                Inference.kind == "classification"
+            )
+        ).first()
+        
+        llm_classification = classification_inference.json if classification_inference else None
+        
+        # Record feedback
+        ml_classifier.record_feedback(
+            db=db,
+            email=email,
+            user_id=current_user.id,
+            is_spam=is_spam,
+            features=features,
+            llm_classification=llm_classification
+        )
+        
+        # Update classification immediately based on feedback
+        if classification_inference:
+            classification = classification_inference.json
+            if is_spam:
+                classification['is_spam'] = True
+                classification['spam_type'] = 'spam'
+            else:
+                classification['is_spam'] = False
+                classification['spam_type'] = 'not_spam'
+            classification_inference.json = classification
+            db.commit()
+        
+        logger.info(f"Recorded spam feedback for email {email_id}: is_spam={is_spam}")
+        
+        return {
+            "status": "success",
+            "message": "Feedback recorded - future emails will be classified more accurately"
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to record spam feedback: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/reclassify-all")
+def reclassify_all_emails(
+    current_user: User = Depends(require_auth),
+    db: Session = Depends(get_db)
+):
+    """Reclassify all emails with updated aggressive spam detection rules."""
+    from .pipeline import process_email
+    
+    try:
+        # Get all user's emails
+        emails = db.query(Email).filter(Email.user_id == current_user.id).all()
+        
+        logger.info(f"Starting reclassification of {len(emails)} emails for user {current_user.email}")
+        
+        # Delete all existing classifications and ML classifications to force reprocessing
+        deleted_count = db.query(Inference).filter(
+            and_(
+                Inference.email_id.in_([e.id for e in emails]),
+                or_(
+                    Inference.kind == "classification",
+                    Inference.kind == "ml_spam_classification"
+                )
+            )
+        ).delete(synchronize_session=False)
+        
+        db.commit()
+        logger.info(f"Deleted {deleted_count} old classifications")
+        
+        # Reprocess all emails with new rules
+        processed = 0
+        for email in emails:
+            try:
+                process_email(db, email)
+                processed += 1
+                if processed % 10 == 0:
+                    logger.info(f"Reclassified {processed}/{len(emails)} emails")
+            except Exception as e:
+                logger.error(f"Failed to reclassify email {email.id}: {e}")
+                continue
+        
+        logger.info(f"Reclassification complete: {processed}/{len(emails)} emails processed")
+        
+        return {
+            "status": "success",
+            "total_emails": len(emails),
+            "processed": processed,
+            "message": f"Reclassified {processed} emails with updated spam detection rules"
+        }
+        
+    except Exception as e:
+        logger.error(f"Reclassification failed: {e}")
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 

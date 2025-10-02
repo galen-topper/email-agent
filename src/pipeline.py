@@ -9,7 +9,9 @@ from .config import settings
 logger = logging.getLogger(__name__)
 
 def process_email(db: Session, email: Email) -> bool:
-    """Process a single email through the AI pipeline."""
+    """Process a single email through the AI pipeline with ML spam detection."""
+    from .ml_spam_classifier import ml_classifier
+    
     try:
         # Check if already processed (permanent caching - never reprocess)
         existing_classification = db.query(Inference).filter(
@@ -26,17 +28,24 @@ def process_email(db: Session, email: Email) -> bool:
             )
         ).first()
         
-        if existing_classification and existing_summary:
+        existing_ml_classification = db.query(Inference).filter(
+            and_(
+                Inference.email_id == email.id,
+                Inference.kind == "ml_spam_classification"
+            )
+        ).first()
+        
+        if existing_classification and existing_summary and existing_ml_classification:
             logger.info(f"Email {email.id} already fully processed (cached), skipping")
             return True
         
         if existing_classification:
-            logger.info(f"Email {email.id} already has classification (cached), will only summarize")
+            logger.info(f"Email {email.id} already has classification (cached)")
         
         if existing_summary:
-            logger.info(f"Email {email.id} already has summary (cached), will only classify")
+            logger.info(f"Email {email.id} already has summary (cached)")
         
-        # Step 1: Classify email (skip if cached)
+        # Step 1: Classify email with LLM (skip if cached)
         if not existing_classification:
             logger.info(f"Classifying email {email.id}: {email.subject}")
             classification = classify_email(
@@ -57,6 +66,54 @@ def process_email(db: Session, email: Email) -> bool:
         else:
             # Use cached classification
             classification = existing_classification.json
+        
+        # Step 2: ML-based spam classification (skip if cached)
+        if not existing_ml_classification:
+            logger.info(f"ML spam classification for email {email.id}")
+            ml_result = ml_classifier.classify(
+                email=email,
+                db=db,
+                user_id=email.user_id,
+                snippet=email.snippet,
+                llm_classification=classification
+            )
+            
+            # Override LLM spam decision with ML if ML is more confident
+            if ml_result['classification'] == 'spam':
+                classification['is_spam'] = True
+                classification['spam_type'] = 'spam'
+            elif ml_result['classification'] == 'potential_spam':
+                classification['is_spam'] = False  # Don't hide it completely
+                classification['spam_type'] = 'potential_spam'
+            else:
+                classification['spam_type'] = 'not_spam'
+            
+            # Add ML score to classification
+            classification['ml_spam_score'] = ml_result['ml_score']
+            classification['ml_confidence'] = ml_result['confidence']
+            
+            # Save ML classification
+            ml_inference = Inference(
+                email_id=email.id,
+                kind="ml_spam_classification",
+                json=ml_result,
+                model="ml_heuristic_v1"
+            )
+            db.add(ml_inference)
+            
+            # Update the original classification with ML insights
+            if existing_classification:
+                existing_classification.json = classification
+            else:
+                # Update the classification we just created
+                classification_inference.json = classification
+            
+            db.commit()
+        else:
+            # Use cached ML classification
+            ml_result = existing_ml_classification.json
+            if 'spam_type' not in classification:
+                classification['spam_type'] = ml_result.get('classification', 'not_spam')
         
         # Skip spam emails
         if classification.get("is_spam", False):

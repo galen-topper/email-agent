@@ -308,3 +308,75 @@ def mark_email_as_read_in_gmail(user: User, msg_id: str, is_read: bool = True):
     except Exception as e:
         logger.error(f"Failed to update read status in Gmail for {msg_id}: {e}")
         return False
+
+
+def fetch_gmail_drafts(user: User) -> List[Dict[str, Any]]:
+    """
+    Fetch drafts from Gmail for a user.
+    Returns list of draft data compatible with ComposedDraft model.
+    """
+    drafts = []
+    
+    try:
+        # Get user's credentials
+        credentials = auth.get_user_credentials(user)
+        
+        # Build Gmail API service
+        service = build('gmail', 'v1', credentials=credentials)
+        
+        # Get list of drafts
+        results = service.users().drafts().list(userId='me').execute()
+        gmail_drafts = results.get('drafts', [])
+        
+        logger.info(f"Found {len(gmail_drafts)} Gmail drafts for user {user.email}")
+        
+        if not gmail_drafts:
+            return drafts
+        
+        # Fetch full draft details for each
+        for draft in gmail_drafts:
+            try:
+                draft_detail = service.users().drafts().get(
+                    userId='me',
+                    id=draft['id'],
+                    format='full'
+                ).execute()
+                
+                message = draft_detail.get('message', {})
+                payload = message.get('payload', {})
+                headers = {h['name']: h['value'] for h in payload.get('headers', [])}
+                
+                # Extract body
+                body_text = get_message_body(payload)
+                
+                # Parse recipient fields
+                to_addr = headers.get('To', '')
+                cc_addr = headers.get('Cc', '')
+                bcc_addr = headers.get('Bcc', '')
+                subject = headers.get('Subject', '')
+                
+                # Check if it's a reply (has In-Reply-To or References header)
+                is_reply = 'In-Reply-To' in headers or 'References' in headers
+                
+                drafts.append({
+                    'gmail_draft_id': draft['id'],
+                    'to_addr': to_addr,
+                    'cc_addr': cc_addr if cc_addr else None,
+                    'bcc_addr': bcc_addr if bcc_addr else None,
+                    'subject': subject,
+                    'body': body_text,
+                    'is_reply': is_reply,
+                    'is_forward': False,  # Can't easily determine from Gmail
+                    'reply_to_email_id': None  # Would need to match with existing emails
+                })
+                
+            except Exception as e:
+                logger.warning(f"Failed to fetch draft {draft['id']}: {e}")
+                continue
+        
+        logger.info(f"Successfully parsed {len(drafts)} Gmail drafts")
+        return drafts
+        
+    except Exception as e:
+        logger.error(f"Failed to fetch Gmail drafts: {e}")
+        return []

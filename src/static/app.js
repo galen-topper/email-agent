@@ -6,10 +6,47 @@ let totalEmails = 0;
 let isSpamView = false;
 let backgroundCheckInterval = null;
 
+// Auto-sync interval (every 5 minutes)
+let autoSyncInterval = null;
+
 // Initialize
 loadStats();
 loadInbox();
 checkBackgroundProcessing();
+
+// Start automatic syncing every 5 minutes
+startAutoSync();
+
+// Sync when page becomes visible again (user returns to tab)
+document.addEventListener('visibilitychange', function() {
+    if (!document.hidden) {
+        console.log('Page visible again - syncing emails');
+        pollEmails();
+    }
+});
+
+function startAutoSync() {
+    // Clear any existing interval
+    if (autoSyncInterval) {
+        clearInterval(autoSyncInterval);
+    }
+    
+    // Sync every 5 minutes (300000 ms)
+    autoSyncInterval = setInterval(() => {
+        console.log('Auto-sync: Checking for new emails');
+        pollEmails();
+    }, 300000); // 5 minutes
+    
+    console.log('Auto-sync started - checking for new emails every 5 minutes');
+}
+
+function stopAutoSync() {
+    if (autoSyncInterval) {
+        clearInterval(autoSyncInterval);
+        autoSyncInterval = null;
+        console.log('Auto-sync stopped');
+    }
+}
 
 async function loadStats() {
     try {
@@ -529,6 +566,53 @@ async function checkConfiguration() {
     return false;
 }
 
+async function reclassifyAllEmails() {
+    const button = event?.target?.closest('.reclassify-button');
+    
+    // Confirm action
+    if (!confirm('This will reclassify ALL emails with updated aggressive spam detection rules. This may take 1-2 minutes. Continue?')) {
+        return;
+    }
+    
+    if (button) {
+        button.disabled = true;
+        button.classList.add('reclassifying');
+    }
+    
+    showNotification('info', 'Reclassifying all emails... This may take a few minutes.');
+    
+    try {
+        const response = await fetch('/api/reclassify-all', { method: 'POST' });
+        
+        if (response.status === 401) {
+            window.location.href = '/login';
+            return;
+        }
+        
+        const data = await response.json();
+        
+        if (data.status === 'success') {
+            showNotification('success', `✅ Reclassified ${data.processed} emails! Many spam/promotional emails should now be filtered out. Refreshing...`);
+            
+            // Refresh the inbox after a brief delay
+            setTimeout(() => {
+                loadInbox(currentFilter);
+                loadStats();
+            }, 2000);
+        } else {
+            showNotification('error', `Reclassification failed: ${data.message || 'Unknown error'}`);
+        }
+    } catch (error) {
+        console.error('Reclassify error:', error);
+        showNotification('error', 'Reclassification failed. Please try again.');
+    } finally {
+        if (button) {
+            button.disabled = false;
+            button.classList.remove('reclassifying');
+        }
+    }
+}
+
 async function pollEmails() {
     const button = event?.target?.closest('.sync-button');
     
@@ -549,17 +633,20 @@ async function pollEmails() {
         
         const data = await response.json();
         
-        if (data.fetched === 0 && data.processed === 0) {
-            // Check for configuration issues
-            const errorMsg = data.error || 'No new emails found';
-            showNotification('info', `No new emails: ${errorMsg}`);
+        if (data.error) {
+            showNotification('error', `Sync error: ${data.error}`);
+        } else if (data.fetched === 0 && data.processed === 0) {
+            // No new emails
+            showNotification('info', data.message || 'No new emails');
         } else {
+            // New emails found
             if (data.background_processing) {
-                showNotification('success', `Syncing ${data.fetched} emails in background...`);
+                showNotification('success', `Processing ${data.fetched} emails in background...`);
                 // Start checking for background completion
                 startBackgroundPolling();
             } else {
-                showNotification('success', `Synced ${data.fetched} emails successfully`);
+                const msg = data.message || `Synced ${data.fetched} new email${data.fetched > 1 ? 's' : ''}`;
+                showNotification('success', msg);
             }
         }
         
@@ -959,8 +1046,11 @@ let draftAutoSaveTimer = null;
 
 // Show compose email modal
 async function showComposeModal(replyTo = null, forward = false, draftId = null) {
-    const modal = document.createElement('div');
-    modal.className = 'modal-overlay';
+    // Remove existing compose panel if any
+    const existingOverlay = document.querySelector('.compose-overlay');
+    const existingPanel = document.querySelector('.compose-modal');
+    if (existingOverlay) existingOverlay.remove();
+    if (existingPanel) existingPanel.remove();
     
     const isReply = replyTo !== null;
     const title = forward ? 'Forward Email' : (isReply ? 'Reply to Email' : 'Compose Email');
@@ -979,45 +1069,62 @@ async function showComposeModal(replyTo = null, forward = false, draftId = null)
         }
     }
     
-    modal.innerHTML = `
-        <div class="modal compose-modal">
-            <div class="modal-header">
-                <div class="modal-title">${title}<span id="draftStatus" style="margin-left: 12px; font-size: 12px; color: #888;"></span></div>
-                <button class="modal-close" onclick="closeDraftModal()">✕</button>
-            </div>
-            <div class="modal-body">
-                <form id="composeForm" onsubmit="sendEmail(event)">
-                    <div class="compose-field">
-                        <label>To:</label>
-                        <input type="text" id="composeTo" name="to" value="${draftData ? draftData.to : (isReply && !forward ? replyTo.from_addr : '')}" required autocomplete="off" />
-                    </div>
-                    <div class="compose-field">
-                        <label>Cc:</label>
-                        <input type="text" id="composeCc" name="cc" value="${draftData ? (draftData.cc || '') : ''}" autocomplete="off" />
-                    </div>
-                    <div class="compose-field">
-                        <label>Bcc:</label>
-                        <input type="text" id="composeBcc" name="bcc" value="${draftData ? (draftData.bcc || '') : ''}" autocomplete="off" />
-                    </div>
-                    <div class="compose-field">
-                        <label>Subject:</label>
-                        <input type="text" id="composeSubject" name="subject" value="${draftData ? draftData.subject : (isReply ? 'Re: ' + replyTo.subject : '')}" required />
-                    </div>
-                    <div class="compose-field">
-                        <label>Message:</label>
-                        <textarea id="composeBody" name="body" rows="15" required>${draftData ? draftData.body : ''}</textarea>
-                    </div>
-                    <div class="compose-actions">
-                        <button type="submit" class="btn btn-primary">Send</button>
-                        <button type="button" class="btn" onclick="closeDraftModal()">Cancel</button>
-                        ${isReply ? '<button type="button" class="btn" onclick="autoDraftReply(' + replyTo.id + ')">Auto-Draft Reply</button>' : ''}
-                    </div>
-                </form>
-            </div>
+    // Create overlay (semi-transparent background)
+    const overlay = document.createElement('div');
+    overlay.className = 'compose-overlay';
+    overlay.onclick = () => closeDraftModal();
+    
+    // Create sliding panel
+    const panel = document.createElement('div');
+    panel.className = 'compose-modal';
+    
+    // Prevent clicks on panel from closing it
+    panel.onclick = (e) => e.stopPropagation();
+    
+    panel.innerHTML = `
+        <div class="compose-header">
+            <div class="compose-title">${title}<span id="draftStatus" style="margin-left: 12px; font-size: 12px; color: #888;"></span></div>
+            <button class="compose-close" onclick="closeDraftModal()">✕</button>
+        </div>
+        <div class="compose-body">
+            <form id="composeForm" onsubmit="sendEmail(event)">
+                <div class="compose-field">
+                    <label>To:</label>
+                    <input type="text" id="composeTo" name="to" value="${draftData ? draftData.to : (isReply && !forward ? replyTo.from_addr : '')}" required autocomplete="off" />
+                </div>
+                <div class="compose-field">
+                    <label>Cc:</label>
+                    <input type="text" id="composeCc" name="cc" value="${draftData ? (draftData.cc || '') : ''}" autocomplete="off" />
+                </div>
+                <div class="compose-field">
+                    <label>Bcc:</label>
+                    <input type="text" id="composeBcc" name="bcc" value="${draftData ? (draftData.bcc || '') : ''}" autocomplete="off" />
+                </div>
+                <div class="compose-field">
+                    <label>Subject:</label>
+                    <input type="text" id="composeSubject" name="subject" value="${draftData ? draftData.subject : (isReply ? 'Re: ' + replyTo.subject : '')}" required />
+                </div>
+                <div class="compose-field">
+                    <label>Message:</label>
+                    <textarea id="composeBody" name="body" rows="15" required>${draftData ? draftData.body : ''}</textarea>
+                </div>
+                <div class="compose-actions">
+                    <button type="submit" class="btn btn-primary">Send</button>
+                    <button type="button" class="btn" onclick="closeDraftModal()">Cancel</button>
+                    ${isReply ? '<button type="button" class="btn" onclick="autoDraftReply(' + replyTo.id + ')">Auto-Draft Reply</button>' : ''}
+                </div>
+            </form>
         </div>
     `;
     
-    document.body.appendChild(modal);
+    document.body.appendChild(overlay);
+    document.body.appendChild(panel);
+    
+    // Trigger animation after a brief delay
+    setTimeout(() => {
+        overlay.classList.add('active');
+        panel.classList.add('active');
+    }, 10);
     
     // Initialize autocomplete for email fields
     initializeAutocomplete('composeTo');
@@ -1049,11 +1156,18 @@ function closeDraftModal() {
         draftAutoSaveTimer = null;
     }
     
-    // Close modal
-    const modal = document.querySelector('.modal-overlay');
-    if (modal) {
-        document.body.removeChild(modal);
-    }
+    // Close panel with animation
+    const overlay = document.querySelector('.compose-overlay');
+    const panel = document.querySelector('.compose-modal');
+    
+    if (overlay) overlay.classList.remove('active');
+    if (panel) panel.classList.remove('active');
+    
+    // Remove elements after animation completes
+    setTimeout(() => {
+        if (overlay) overlay.remove();
+        if (panel) panel.remove();
+    }, 300); // Match transition duration
 }
 
 function hasAnyContent() {
@@ -1064,15 +1178,22 @@ function hasAnyContent() {
 }
 
 function debounceDraftSave(replyToEmailId, isReply, isForward) {
+    // Show "Saving..." indicator immediately
+    const status = document.getElementById('draftStatus');
+    if (status) {
+        status.textContent = 'Saving...';
+        status.style.color = '#888';
+    }
+    
     // Clear existing timer
     if (draftAutoSaveTimer) {
         clearTimeout(draftAutoSaveTimer);
     }
     
-    // Set new timer for 2 seconds
+    // Set new timer for 1 second (faster auto-save)
     draftAutoSaveTimer = setTimeout(() => {
         saveDraftNow(replyToEmailId, isReply, isForward);
-    }, 2000);
+    }, 1000);
 }
 
 async function saveDraftNow(replyToEmailId, isReply, isForward) {
@@ -1123,9 +1244,10 @@ async function saveDraftNow(replyToEmailId, isReply, isForward) {
             const status = document.getElementById('draftStatus');
             if (status) {
                 status.textContent = '✓ Saved';
+                status.style.color = '#10b981'; // Green
                 setTimeout(() => {
                     status.textContent = '';
-                }, 2000);
+                }, 3000);
             }
         }
     } catch (error) {
