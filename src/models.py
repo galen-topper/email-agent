@@ -1,5 +1,5 @@
 from sqlalchemy.orm import declarative_base, relationship
-from sqlalchemy import Column, Integer, String, DateTime, Text, Boolean, JSON, ForeignKey
+from sqlalchemy import Column, Integer, String, DateTime, Text, Boolean, JSON, ForeignKey, Date
 from datetime import datetime
 
 Base = declarative_base()
@@ -93,3 +93,28 @@ class SpamFeedback(Base):
     has_links = Column(Boolean)
     has_attachments = Column(Boolean)
     llm_spam_score = Column(JSON)  # Store original LLM classification
+
+class DailyDigest(Base):
+    """Daily AI digest per user."""
+    __tablename__ = "daily_digests"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    digest_date = Column(Date, nullable=False, index=True)
+    summary_json = Column(JSON)  # {summary, top_items:[{email_id, subject, importance, link}], stats:{...}}
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class Attachment(Base):
+    """Email attachments for composed drafts."""
+    __tablename__ = "attachments"
+    id = Column(Integer, primary_key=True)
+    draft_id = Column(Integer, ForeignKey("composed_drafts.id"), nullable=False)
+    filename = Column(String, nullable=False)
+    content_type = Column(String, nullable=False)  # MIME type
+    file_size = Column(Integer, nullable=False)  # bytes
+    file_path = Column(String, nullable=False)  # path on disk or base64 data
+    created_at = Column(DateTime, default=datetime.utcnow)
+    draft = relationship("ComposedDraft", back_populates="attachments")
+
+# Add relationship to ComposedDraft
+ComposedDraft.attachments = relationship("Attachment", back_populates="draft", cascade="all, delete-orphan")

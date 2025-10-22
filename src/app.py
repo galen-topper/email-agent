@@ -10,9 +10,10 @@ from datetime import datetime
 from pathlib import Path
 
 from .config import settings
-from .models import Base, Email, Inference, Draft, User, ComposedDraft
+import math
+from .models import Base, Email, Inference, Draft, User, ComposedDraft, Attachment
 from .imap_client import fetch_unseen_emails
-from .pipeline import process_email, process_new_emails, get_email_with_inferences, summarize_pending_emails
+from .pipeline import process_email, process_new_emails, get_email_with_inferences, summarize_pending_emails, build_daily_digest
 from .smtp_client import send_reply
 from .utils import save_email_to_db, get_email_stats, format_email_for_display
 from . import auth
@@ -122,6 +123,34 @@ def get_stats(db: Session = Depends(get_db)):
     """Get email statistics."""
     return get_email_stats(db)
 
+
+@app.post("/api/agent/daily-digest")
+def create_daily_digest(date: Optional[str] = Query(None, description="ISO date, defaults to today"), current_user: User = Depends(require_auth), db: Session = Depends(get_db)):
+    """Build a daily AI digest for the given date (requires auth)."""
+    import datetime as dt
+    try:
+        d = dt.date.fromisoformat(date) if date else dt.date.today()
+        dd = build_daily_digest(db, current_user.id, d)
+        return {"status": "success", "digest": dd.summary_json}
+    except Exception as e:
+        logger.error(f"Daily digest build failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/agent/daily-digest")
+def get_daily_digest(date: Optional[str] = Query(None, description="ISO date, defaults to today"), current_user: User = Depends(require_auth), db: Session = Depends(get_db)):
+    import datetime as dt
+    d = dt.date.fromisoformat(date) if date else dt.date.today()
+    dd = db.query(ComposedDraft.__table__.metadata.tables['daily_digests']).where(  # type: ignore
+        # Using raw table access to avoid adding relationship boilerplate here
+    )
+    # Simpler: fetch via ORM model
+    from .models import DailyDigest
+    found = db.query(DailyDigest).filter(DailyDigest.user_id == current_user.id, DailyDigest.digest_date == d).first()
+    if not found:
+        raise HTTPException(status_code=404, detail="No digest found for this date")
+    return {"status": "success", "digest": found.summary_json}
+
 @app.get("/api/inbox")
 def get_inbox(
     filter: Optional[str] = Query(None, alias="filter", description="Filter by: needs_reply, high, normal, low"),
@@ -162,9 +191,11 @@ def get_inbox(
             
             if classification:
                 class_data = classification.json
-                if filter == "needs_reply" and class_data.get("action") == "needs_reply":
+                # Exclude sent emails from needs_reply filter
+                is_sent = class_data.get("is_sent", False)
+                if filter == "needs_reply" and class_data.get("action") == "needs_reply" and not is_sent:
                     filtered_emails.append(email)
-                elif filter in ["high", "normal", "low"] and class_data.get("priority") == filter:
+                elif filter in ["high", "normal", "low"] and class_data.get("priority") == filter and not is_sent:
                     filtered_emails.append(email)
             elif filter == "needs_reply":  # Include unprocessed emails in needs_reply filter
                 filtered_emails.append(email)
@@ -208,6 +239,73 @@ def get_inbox(
         "offset": offset,
         "has_more": offset + len(result) < total_count
     }
+
+
+@app.get("/api/essential")
+def get_essential(
+    limit: int = Query(20, description="Number of emails (10, 20, 50, 100)"),
+    current_user: User = Depends(require_auth),
+    db: Session = Depends(get_db)
+):
+    """Return essential emails selected by the agent (needs_reply/high, non-spam, recent)."""
+    # Candidate pool: latest 200 for the user, excluding spam
+    base_query = db.query(Email).filter(Email.user_id == current_user.id).order_by(Email.received_at.desc()).limit(200)
+    candidates = base_query.all()
+    # Map id -> classification
+    class_map = {c.email_id: c for c in db.query(Inference).filter(Inference.kind == "classification").all()}
+    
+    # Scoring function emphasizing recency and unmet replies
+    now = datetime.utcnow()
+    def compute_score(e: Email, cj: dict) -> float:
+        if not e.received_at:
+            recency_score = 0.0
+        else:
+            minutes = max(0.0, (now - e.received_at).total_seconds() / 60.0)
+            # Exponential decay with ~6h horizon
+            recency_score = math.exp(-minutes / (60.0 * 6.0)) * 5.0
+        score = recency_score
+        # Unmet replies are most important
+        if cj.get('action') == 'needs_reply' and (e.replied_at is None):
+            score += 5.0
+        # High priority boost
+        if cj.get('priority') == 'high':
+            score += 2.0
+        # Unread boost
+        if not e.is_read:
+            score += 1.0
+        # Time-sensitive / scheduling keyword boost
+        subj = (e.subject or '').lower()
+        body = (e.snippet or '').lower()
+        keywords = [
+            'meeting','invite','invitation','calendar','rsvp','appointment','schedule','scheduled','reschedule',
+            'deadline','due','by eod','today','tomorrow','asap','urgent','time-sensitive','zoom','meet.google.com','teams meeting'
+        ]
+        if any(k in subj or k in body for k in keywords):
+            score += 1.5
+        return score
+
+    # Filter out spam, score, and rank
+    scored = []
+    for e in candidates:
+        c = class_map.get(e.id)
+        cj = c.json if c else {}
+        if cj.get('is_spam'):
+            continue
+        scored.append((e, compute_score(e, cj)))
+    scored.sort(key=lambda pair: (pair[1], pair[0].received_at or datetime(1970, 1, 1)), reverse=True)
+    filtered = [e for e, _ in scored]
+    # Limit
+    selected = filtered[:limit]
+    # Build response
+    result = []
+    for e in selected:
+        c = class_map.get(e.id)
+        classification = c.json if c else None
+        summary = db.query(Inference).filter(
+            Inference.email_id == e.id, Inference.kind == 'summary'
+        ).order_by(Inference.created_at.desc()).first()
+        result.append(format_email_for_display(e, classification, summary.json if summary else None))
+    return {"emails": result, "count": len(result), "limit": limit}
 
 @app.get("/api/spam")
 def get_spam(
@@ -288,7 +386,9 @@ def get_spam(
 
 @app.get("/api/email/{email_id}")
 def get_email_detail(email_id: int, current_user: User = Depends(require_auth), db: Session = Depends(get_db)):
-    """Get detailed email information including inferences and drafts (requires auth)."""
+    """Get detailed email information including inferences, drafts, and thread emails (requires auth)."""
+    from .utils import get_thread_emails
+    
     email_data = get_email_with_inferences(db, email_id)
     
     if not email_data:
@@ -298,6 +398,23 @@ def get_email_detail(email_id: int, current_user: User = Depends(require_auth), 
     classification = email_data["classification"]
     summary = email_data["summary"]
     drafts = email_data["drafts"]
+    
+    # Get thread emails if this email is part of a thread
+    thread_emails = []
+    if email.thread_id:
+        thread_emails_list = get_thread_emails(db, email.thread_id, current_user.id)
+        # Format thread emails, excluding the current email
+        for thread_email in thread_emails_list:
+            if thread_email.id != email.id:
+                thread_cls = db.query(Inference).filter(
+                    Inference.email_id == thread_email.id,
+                    Inference.kind == "classification"
+                ).order_by(Inference.created_at.desc()).first()
+                thread_emails.append(format_email_for_display(
+                    thread_email,
+                    thread_cls.json if thread_cls else None,
+                    None
+                ))
     
     return {
         "email": format_email_for_display(email, classification, summary),
@@ -312,7 +429,9 @@ def get_email_detail(email_id: int, current_user: User = Depends(require_auth), 
                 "created_at": draft.created_at.isoformat()
             }
             for draft in drafts
-        ]
+        ],
+        "thread_emails": thread_emails,
+        "thread_count": len(thread_emails)
     }
 
 @app.post("/api/drafts/{draft_id}/approve")
@@ -378,11 +497,28 @@ def send_email_endpoint(
         bcc_addr = email_data.get('bcc', '')
         subject = email_data.get('subject', '')
         body = email_data.get('body', '')
+        draft_id = email_data.get('draft_id')
         
         if not to_addr or not subject or not body:
             raise HTTPException(status_code=400, detail="Missing required fields: to, subject, body")
         
         logger.info(f"Sending email to {to_addr} from {current_user.email}")
+        
+        # Get attachments if draft_id provided
+        attachments = []
+        if draft_id:
+            draft = db.query(ComposedDraft).filter(
+                ComposedDraft.id == draft_id,
+                ComposedDraft.user_id == current_user.id
+            ).first()
+            if draft:
+                db_attachments = db.query(Attachment).filter(Attachment.draft_id == draft_id).all()
+                for att in db_attachments:
+                    attachments.append({
+                        'filename': att.filename,
+                        'content_type': att.content_type,
+                        'file_path': att.file_path
+                    })
         
         # Send via Gmail API
         success = send_email_smtp(
@@ -391,12 +527,12 @@ def send_email_endpoint(
             body=body,
             cc_addr=cc_addr if cc_addr else None,
             bcc_addr=bcc_addr if bcc_addr else None,
-            user=current_user
+            user=current_user,
+            attachments=attachments if attachments else None
         )
         
         if success:
             # Mark draft as sent if draft_id provided
-            draft_id = email_data.get('draft_id')
             if draft_id:
                 draft = db.query(ComposedDraft).filter(
                     ComposedDraft.id == draft_id,
@@ -420,6 +556,110 @@ def send_email_endpoint(
     except Exception as e:
         logger.error(f"Failed to send email: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to send email: {str(e)}")
+
+@app.post("/api/drafts/{draft_id}/upload-attachment")
+async def upload_attachment(
+    draft_id: int,
+    file: bytes = Depends(lambda: None),
+    current_user: User = Depends(require_auth),
+    db: Session = Depends(get_db)
+):
+    """Upload an attachment for a draft (requires auth)."""
+    from fastapi import File, UploadFile, Form
+    import os
+    import uuid
+    
+    try:
+        # Verify draft belongs to user
+        draft = db.query(ComposedDraft).filter(
+            ComposedDraft.id == draft_id,
+            ComposedDraft.user_id == current_user.id
+        ).first()
+        
+        if not draft:
+            raise HTTPException(status_code=404, detail="Draft not found")
+        
+        # This endpoint expects multipart/form-data
+        # We'll handle this differently - return instructions for now
+        return {"status": "success", "message": "Use multipart/form-data to upload files"}
+        
+    except Exception as e:
+        logger.error(f"Failed to upload attachment: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/attachments/{attachment_id}")
+def get_attachment(
+    attachment_id: int,
+    current_user: User = Depends(require_auth),
+    db: Session = Depends(get_db)
+):
+    """Download an attachment (requires auth)."""
+    try:
+        # Get attachment
+        attachment = db.query(Attachment).filter(Attachment.id == attachment_id).first()
+        
+        if not attachment:
+            raise HTTPException(status_code=404, detail="Attachment not found")
+        
+        # Verify user owns the draft
+        draft = db.query(ComposedDraft).filter(
+            ComposedDraft.id == attachment.draft_id,
+            ComposedDraft.user_id == current_user.id
+        ).first()
+        
+        if not draft:
+            raise HTTPException(status_code=403, detail="Access denied")
+        
+        # Return file
+        return FileResponse(
+            path=attachment.file_path,
+            filename=attachment.filename,
+            media_type=attachment.content_type
+        )
+        
+    except Exception as e:
+        logger.error(f"Failed to get attachment: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/attachments/{attachment_id}")
+def delete_attachment(
+    attachment_id: int,
+    current_user: User = Depends(require_auth),
+    db: Session = Depends(get_db)
+):
+    """Delete an attachment (requires auth)."""
+    import os
+    
+    try:
+        # Get attachment
+        attachment = db.query(Attachment).filter(Attachment.id == attachment_id).first()
+        
+        if not attachment:
+            raise HTTPException(status_code=404, detail="Attachment not found")
+        
+        # Verify user owns the draft
+        draft = db.query(ComposedDraft).filter(
+            ComposedDraft.id == attachment.draft_id,
+            ComposedDraft.user_id == current_user.id
+        ).first()
+        
+        if not draft:
+            raise HTTPException(status_code=403, detail="Access denied")
+        
+        # Delete file from disk
+        if os.path.exists(attachment.file_path):
+            os.remove(attachment.file_path)
+        
+        # Delete from database
+        db.delete(attachment)
+        db.commit()
+        
+        return {"status": "success", "message": "Attachment deleted"}
+        
+    except Exception as e:
+        logger.error(f"Failed to delete attachment: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/contacts")
 def get_contacts(

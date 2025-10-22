@@ -3,12 +3,50 @@ Utility functions for the email agent.
 """
 
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from sqlalchemy.orm import Session
-from .models import Email, Inference, Draft
+from .models import Email, Inference, Draft, User
 from .rules import apply_heuristic_rules
 
 logger = logging.getLogger(__name__)
+
+def is_sent_by_user(email: Email, user: User) -> bool:
+    """Check if an email was sent by the user (either from SENT label or matching from_addr)."""
+    # Check if email has SENT label
+    labels = email.labels_json or {}
+    if isinstance(labels, dict):
+        label_list = labels.get('labels', [])
+    elif isinstance(labels, list):
+        label_list = labels
+    else:
+        label_list = []
+    
+    if 'SENT' in label_list:
+        return True
+    
+    # Check if from_addr matches user's email
+    if email.from_addr and user.email:
+        user_email_normalized = user.email.lower().strip()
+        # Extract email from "Name <email>" format if needed
+        from_email = email.from_addr.lower().strip()
+        if '<' in from_email:
+            from_email = from_email.split('<')[1].split('>')[0].strip()
+        
+        return from_email == user_email_normalized
+    
+    return False
+
+def get_thread_emails(db: Session, thread_id: str, user_id: int) -> List[Email]:
+    """Get all emails in a thread, ordered by received date."""
+    if not thread_id:
+        return []
+    
+    emails = db.query(Email).filter(
+        Email.thread_id == thread_id,
+        Email.user_id == user_id
+    ).order_by(Email.received_at.asc()).all()
+    
+    return emails
 
 def save_email_to_db(db: Session, email_data: Dict[str, Any]) -> Optional[Email]:
     """Save email data to database, handling duplicates by msg_id."""
@@ -53,8 +91,20 @@ def save_email_to_db(db: Session, email_data: Dict[str, Any]) -> Optional[Email]
         db.rollback()
         return None
 
-def classify_with_rules_and_llm(db: Session, email: Email, llm_classify_func) -> Dict[str, Any]:
-    """Apply heuristic rules first, then LLM if needed."""
+def classify_with_rules_and_llm(db: Session, email: Email, llm_classify_func, user: User = None) -> Dict[str, Any]:
+    """Apply heuristic rules first, then LLM if needed. Skip classification for sent emails."""
+    # Check if this is an email sent by the user
+    if user and is_sent_by_user(email, user):
+        logger.info(f"Email {email.id} is sent by user, classifying as sent")
+        return {
+            "priority": "low",
+            "action": "archive",
+            "is_spam": False,
+            "is_sent": True,
+            "spam_type": "not_spam",
+            "reasoning": "Email sent by user"
+        }
+    
     # Try heuristic rules first
     rule_result = apply_heuristic_rules(
         subject=email.subject,
@@ -109,9 +159,10 @@ def format_email_for_display(email: Email, classification: Dict = None, summary:
         # Only mark as needs_reply if user hasn't replied yet
         needs_reply = email.replied_at is None
     
-    return {
+    payload = {
         "id": email.id,
         "msg_id": email.msg_id,
+        "thread_id": email.thread_id,
         "from": email.from_addr,
         "to": email.to_addr,
         "subject": email.subject,
@@ -123,3 +174,7 @@ def format_email_for_display(email: Email, classification: Dict = None, summary:
         "classification": classification,
         "summary": summary
     }
+    # If needs_reply but replied_at exists (edge cases), correct it
+    if payload["needs_reply"] and email.replied_at is not None:
+        payload["needs_reply"] = False
+    return payload

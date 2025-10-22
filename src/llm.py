@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 client = openai.OpenAI(api_key=settings.OPENAI_API_KEY)
 
 SYSTEM_PROMPTS = {
-    "classifier": """You are an extremely aggressive email triage classifier. Your PRIMARY goal is protecting the user's attention from ANY unsolicited content. Output strict JSON:
+    "classifier": """You are an ULTRA-AGGRESSIVE email triage classifier. Your PRIMARY goal is protecting the user's attention from ANY unsolicited content. Output strict JSON:
 {"priority": "high|normal|low", "is_spam": true|false, "spam_confidence": 0.0-1.0, "action": "archive|needs_reply|read_only", "reasons": ["..."]}
 
 🚨 MARK AS SPAM (is_spam=true, spam_confidence >= 0.7):
@@ -27,18 +27,43 @@ MONEY REQUESTS (critical - these are spam):
 - "Your contribution matters"
 - Appeals for financial support
 
-MARKETING & PROMOTIONS:
+PROMOTIONAL & SALES CONTENT (AUTO-SPAM):
 - ALL marketing emails, newsletters, promotions, sales pitches
 - "Unsubscribe" or "opt-out" links = automatic spam
 - Mass emails from marketing platforms (SendGrid, Mailchimp, Constant Contact)
-- Sales offers, deals, discounts, coupons, special offers
+- ANYTHING offering a promotion, special, sale, discount, deal, or coupon
+- "Save 20%", "50% off", "Buy now", "Limited time", "Flash sale", "Clearance"
+- "Special offer", "Exclusive deal", "Today only", "Don't miss", "Last chance"
+- "Black Friday", "Cyber Monday", "Holiday sale", "End of season"
 - Product announcements you didn't request
-- "Limited time offer", "Act now", "Don't miss out"
-- Generic greetings: "Dear Customer", "Hello Friend", "Hi there"
+- "New arrivals", "Just launched", "Now available"
+- "Act now", "Don't miss out", "Hurry", "Expires soon"
+- Generic greetings: "Dear Customer", "Hello Friend", "Hi there", "Valued customer"
 - Event invitations from organizations (not personal invites from colleagues)
 - Webinar invitations, conference promotions
 - Survey requests from companies
 - Newsletter signups you don't remember
+- Retail/e-commerce marketing ("Shop now", "Browse collection", "See what's new")
+
+RETAIL PROMOTIONAL EMAILS (ULTRA-AGGRESSIVE FILTERING):
+- ANY email from Amazon that is NOT an order confirmation, shipping update, or return/refund
+- Amazon Business offers, Prime Video content updates, Prime Day announcements
+- Walmart/Target/BestBuy/Home Depot promotional emails
+- "Recommended for you", "You might like", "Based on your interests"
+- "Deals of the day", "Daily deals", "Deal of the week"
+- Product recommendations unless you explicitly requested them
+- "People also bought", "Customers who bought X also bought Y"
+- Wishlist/cart reminders with promotional angles
+- "Items on sale from your wishlist"
+- "Your favorites are on sale"
+- Subscription renewal reminders with promotional content (50%+ marketing)
+- Emails from no-reply@, noreply@, marketing@, deals@, offers@, promotions@
+- ANY retail email that says "Shop", "Browse", "Explore", "Discover", "Check out"
+- Price drop notifications for items you didn't explicitly watch
+- "Back in stock" notifications you didn't subscribe to
+- Gift guides, seasonal shopping guides, holiday gift ideas
+- "Shop our [category]" emails from any retailer
+- Member-exclusive offers from retail loyalty programs (unless it's a pure points balance update)
 
 SUSPICIOUS CONTENT:
 - Shortened URLs (bit.ly, tinyurl, goo.gl)
@@ -76,12 +101,20 @@ LEGITIMATE EMAILS ONLY:
 - Banking/financial statements from YOUR bank
 - Government, tax, legal correspondence addressed to you
 - Customer support responses to YOUR tickets
-- Shipping notifications for YOUR orders
+- Shipping notifications for YOUR orders (ONLY tracking/delivery updates)
 - Appointment confirmations YOU scheduled
 - School/university official communications if you're a student/parent
+- Pure account security alerts (password changed, new login, etc.) with NO promotional content
+- Return/refund confirmations from retailers
+- Order cancellation confirmations
+
+IMPORTANT: Even if an email is from Amazon/Walmart/Target and contains your name:
+- If it says "Shop", "Browse", "Deals", "Sale", "Recommended" → SPAM
+- If it's 50%+ promotional content → SPAM
+- If it's ONLY "Order #12345 has shipped" → NOT SPAM
 
 PRIORITY LEVELS:
-- high: urgent deadlines from real people, financial obligations, time-sensitive work
+- high: urgent deadlines from real people, financial obligations, time-sensitive work, scheduling/appointments/meeting invites, time-sensitive requests (e.g., today/ASAP/by EOD)
 - normal: standard work/personal correspondence, routine transactions
 - low: receipts, notifications, FYI messages
 
@@ -90,6 +123,11 @@ ACTION TYPES:
 - read_only: informational, receipts, notifications (no response needed)
 - archive: spam, resolved issues, old threads
 
+THREADS AND REPLIES:
+- Treat emails sharing the same thread_id as part of the same thread; consider thread context if provided
+- If an email is part of a thread and the user has already replied (replied_at set), DO NOT mark as needs_reply
+- Prefer high priority for meeting invites, calendar events, RSVPs, and scheduling messages
+
 ⚠️ CRITICAL RULES:
 1. If it asks for money → spam (unless it's a bill/invoice for services you use)
 2. If it has "unsubscribe" → spam (with rare exceptions for important subscriptions)
@@ -97,8 +135,17 @@ ACTION TYPES:
 4. Generic greeting → likely spam
 5. If you can't tell if it's personal → mark as potential spam (spam_confidence 0.5)
 6. When in doubt, mark as spam or potential spam - protect the user's time!
+7. ANY mention of promotion/special/sale/discount/deal → IMMEDIATE SPAM
+8. ANY retail/e-commerce marketing → IMMEDIATE SPAM
+9. Fundraising/donations → IMMEDIATE SPAM
+10. "Limited time", "Act now", "Don't miss" → IMMEDIATE SPAM
+11. From no-reply@, noreply@, marketing@, deals@, offers@ → IMMEDIATE SPAM
+12. "Shop", "Browse", "Explore", "Discover" from retailers → IMMEDIATE SPAM
+13. "Recommended for you", "You might like", "Based on your" → IMMEDIATE SPAM
+14. Amazon/Walmart/Target emails with ANY promotional content → IMMEDIATE SPAM
+15. Product recommendations from any retailer → IMMEDIATE SPAM
 
-Be EXTREMELY aggressive. It's better to over-filter than let promotional content through.""",
+Be ULTRA-AGGRESSIVE. It's better to over-filter than let ANY promotional/sales content through. Err on the side of marking as spam.""",
 
     "summarizer": """Summarize the entire thread in <= 3 sentences.
 Also extract: {participants: [name@email], asks: ["..."], dates: [ISO], attachments: ["name.ext"], sentiment: "pos|neu|neg"}.
@@ -188,3 +235,46 @@ def improve_style(text: str) -> str:
     content = {"text": text}
     result = call_llm("style_guard", content)
     return result.get("improved_text", text)
+
+
+# Agent prompts
+SYSTEM_PROMPTS.update({
+    "agent_router": """You are AgentMail Orchestrator. Decide which tools to invoke to produce a daily email digest.
+Think like a power user: minimize latency, prioritize important emails, and avoid unnecessary work.
+Return JSON: {rationale, tasks:[{name, inputs}]}.
+Allowed tasks (compose a sequence):
+- collect_today_stats {include_breakdown?: bool}
+- rank_emails {limit?: number, prefer: ["needs_reply","high"], exclude_spam: true}
+- select_top_emails {limit: number, from: "ranked"|"all", filters: {exclude_spam:true, actions?:[...], priorities?:[...]}}
+- ensure_summaries {limit?: number, source: "top"}
+- draft_daily_summary {}
+Guidelines:
+- Always start with collect_today_stats
+- If many emails, call rank_emails before select_top_emails
+- Prefer needs_reply and high priority
+- Keep summaries to top items only to save time
+- End with draft_daily_summary""",
+    "daily_summarizer": """Create a concise summary of emails.
+Input:{stats:{count}, top_items:[{subject, from, received_at, importance, summary}], section: "recent_24h" OR "needs_reply"}
+Output JSON:{overview: "1-2 sentence summary"}
+For recent_24h: Summarize what happened in the last day.
+For needs_reply: Emphasize urgency and importance of replies needed.
+Keep it brief and actionable."""
+})
+
+def agent_route(state: Dict[str, Any]) -> Dict[str, Any]:
+    return call_llm("agent_router", state, model_override="gpt-4o-mini")
+
+def daily_digest_summarize(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return call_llm("daily_summarizer", payload, model_override="gpt-4o-mini")
+
+# Email ranking prompt and helper
+SYSTEM_PROMPTS.update({
+    "email_ranker": """Rank emails by importance for today's digest.
+Input: {items:[{id, subject, from, received_at, importance, action, summary?}]}
+Output JSON: {ordered_ids:[...]} with most important first.
+Preference: needs_reply > high priority > recent > has summary."""
+})
+
+def rank_emails(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return call_llm("email_ranker", payload, model_override="gpt-4o-mini")

@@ -1,6 +1,8 @@
 import smtplib
 import logging
 import base64
+import mimetypes
+from pathlib import Path
 from email.message import EmailMessage
 from email.utils import formataddr
 from .config import settings
@@ -9,8 +11,18 @@ from . import auth
 
 logger = logging.getLogger(__name__)
 
-def send_email_smtp(to_addr: str, subject: str, body: str, cc_addr: str = None, bcc_addr: str = None, user: User = None) -> bool:
-    """Send an email via Gmail API using OAuth credentials."""
+def send_email_smtp(to_addr: str, subject: str, body: str, cc_addr: str = None, bcc_addr: str = None, user: User = None, attachments: list = None) -> bool:
+    """Send an email via Gmail API using OAuth credentials.
+    
+    Args:
+        to_addr: Recipient email address
+        subject: Email subject
+        body: Email body text
+        cc_addr: CC recipients (comma-separated)
+        bcc_addr: BCC recipients (comma-separated)
+        user: User object with Gmail credentials
+        attachments: List of dicts with keys: filename, content_type, file_path (or data as base64)
+    """
     try:
         from googleapiclient.discovery import build
         
@@ -37,6 +49,31 @@ def send_email_smtp(to_addr: str, subject: str, body: str, cc_addr: str = None, 
         msg["Subject"] = subject
         msg.set_content(body)
         
+        # Add attachments if provided
+        if attachments:
+            for attachment in attachments:
+                filename = attachment.get('filename')
+                content_type = attachment.get('content_type', 'application/octet-stream')
+                file_path = attachment.get('file_path')
+                
+                # Parse content type for maintype/subtype
+                maintype, subtype = content_type.split('/', 1) if '/' in content_type else ('application', 'octet-stream')
+                
+                # Read file data
+                if file_path and Path(file_path).exists():
+                    with open(file_path, 'rb') as f:
+                        file_data = f.read()
+                elif 'data' in attachment:
+                    # Base64 encoded data
+                    file_data = base64.b64decode(attachment['data'])
+                else:
+                    logger.warning(f"Attachment {filename} has no valid data source")
+                    continue
+                
+                # Add attachment to message
+                msg.add_attachment(file_data, maintype=maintype, subtype=subtype, filename=filename)
+                logger.info(f"Added attachment: {filename} ({content_type})")
+        
         # Encode message for Gmail API
         raw_message = base64.urlsafe_b64encode(msg.as_bytes()).decode('utf-8')
         message_body = {'raw': raw_message}
@@ -44,7 +81,7 @@ def send_email_smtp(to_addr: str, subject: str, body: str, cc_addr: str = None, 
         # Send via Gmail API
         service.users().messages().send(userId='me', body=message_body).execute()
         
-        logger.info(f"Email sent successfully to {to_addr}: {subject}")
+        logger.info(f"Email sent successfully to {to_addr}: {subject} (with {len(attachments) if attachments else 0} attachments)")
         return True
         
     except Exception as e:

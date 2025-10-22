@@ -5,17 +5,26 @@ let pageSize = 20;
 let totalEmails = 0;
 let isSpamView = false;
 let backgroundCheckInterval = null;
+let lastBackgroundStatus = null;
 
 // Auto-sync interval (every 5 minutes)
 let autoSyncInterval = null;
 
 // Initialize
 loadStats();
+loadDailySummary();
 loadInbox();
-checkBackgroundProcessing();
 
-// Show permanent indicator in bottom-left for accessing actions
-showPermanentIndicator();
+// Check background processing first, then show permanent indicator if idle
+checkBackgroundProcessing().then(() => {
+    // If no processing is happening, show the permanent gear indicator
+    if (!lastBackgroundStatus || !lastBackgroundStatus.is_processing) {
+        showPermanentIndicator();
+    }
+}).catch(() => {
+    // On error, show permanent indicator
+    showPermanentIndicator();
+});
 
 // Start automatic syncing every 5 minutes
 startAutoSync();
@@ -65,6 +74,193 @@ async function loadStats() {
     }
 }
 
+async function loadDailySummary() {
+    const container = document.getElementById('dailySummaryContainer');
+    const content = document.getElementById('dailySummaryContent');
+    
+    try {
+        // Try to get existing digest first
+        let response = await fetch('/api/agent/daily-digest');
+        
+        if (response.status === 404) {
+            // No digest exists, create one
+            console.log('No existing digest found, creating new one...');
+            response = await fetch('/api/agent/daily-digest', { method: 'POST' });
+        }
+        
+        if (response.status === 401) {
+            // Not authenticated, hide summary
+            container.style.display = 'none';
+            return;
+        }
+        
+        if (!response.ok) {
+            throw new Error('Failed to load daily summary');
+        }
+        
+        const data = await response.json();
+        const digest = typeof data.digest === 'string' ? JSON.parse(data.digest) : data.digest;
+        
+        // Show container
+        container.style.display = 'block';
+        
+        // Display the two-section summary
+        content.innerHTML = `
+            ${digest.recent_24h && digest.recent_24h.count > 0 ? `
+                <div class="digest-section">
+                    <div class="digest-section-header">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="12" cy="12" r="10"></circle>
+                            <polyline points="12 6 12 12 16 14"></polyline>
+                        </svg>
+                        Last 24 Hours (${digest.recent_24h.count})
+                    </div>
+                    <div class="digest-text">${escapeHtml(digest.recent_24h.overview)}</div>
+                    ${digest.recent_24h.items && digest.recent_24h.items.length > 0 ? `
+                        <div class="digest-emails">
+                            ${digest.recent_24h.items.slice(0, 5).map(item => `
+                                <div class="digest-email" onclick="viewEmail(${item.email_id})">
+                                    <span class="digest-email-subject">${escapeHtml(item.subject)}</span>
+                                    <span class="digest-email-from">${escapeHtml(item.from)}</span>
+                                </div>
+                            `).join('')}
+                        </div>
+                    ` : ''}
+                </div>
+            ` : ''}
+            
+            ${digest.needs_reply && digest.needs_reply.count > 0 ? `
+                <div class="digest-section digest-needs-reply">
+                    <div class="digest-section-header">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+                        </svg>
+                        Needs Reply (${digest.needs_reply.count})
+                    </div>
+                    <div class="digest-text">${escapeHtml(digest.needs_reply.overview)}</div>
+                    ${digest.needs_reply.items && digest.needs_reply.items.length > 0 ? `
+                        <div class="digest-emails">
+                            ${digest.needs_reply.items.slice(0, 5).map(item => `
+                                <div class="digest-email" onclick="viewEmail(${item.email_id})">
+                                    <span class="digest-email-subject">${escapeHtml(item.subject)}</span>
+                                    <span class="digest-email-from">${escapeHtml(item.from)}</span>
+                                </div>
+                            `).join('')}
+                        </div>
+                    ` : ''}
+                </div>
+            ` : ''}
+            
+            ${(!digest.recent_24h || digest.recent_24h.count === 0) && (!digest.needs_reply || digest.needs_reply.count === 0) ? `
+                <div class="digest-empty">
+                    <div>All caught up! No new emails or pending replies.</div>
+                </div>
+            ` : ''}
+        `;
+        
+    } catch (error) {
+        console.error('Failed to load daily summary:', error);
+        container.style.display = 'none';
+    }
+}
+
+async function refreshDailySummary() {
+    const content = document.getElementById('dailySummaryContent');
+    const button = event?.target?.closest('.daily-summary-refresh');
+    
+    if (button) {
+        button.classList.add('spinning');
+    }
+    
+    content.innerHTML = `
+        <div class="loading">
+            <div class="spinner"></div>
+            <div>Regenerating summary...</div>
+        </div>
+    `;
+    
+    try {
+        // Force create a new digest
+        const response = await fetch('/api/agent/daily-digest', { method: 'POST' });
+        
+        if (response.status === 401) {
+            window.location.href = '/login';
+            return;
+        }
+        
+        if (!response.ok) {
+            throw new Error('Failed to refresh summary');
+        }
+        
+        const data = await response.json();
+        const digest = typeof data.digest === 'string' ? JSON.parse(data.digest) : data.digest;
+        
+        content.innerHTML = `
+            ${digest.recent_24h && digest.recent_24h.count > 0 ? `
+                <div class="digest-section">
+                    <div class="digest-section-header">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="12" cy="12" r="10"></circle>
+                            <polyline points="12 6 12 12 16 14"></polyline>
+                        </svg>
+                        Last 24 Hours (${digest.recent_24h.count})
+                    </div>
+                    <div class="digest-text">${escapeHtml(digest.recent_24h.overview)}</div>
+                    ${digest.recent_24h.items && digest.recent_24h.items.length > 0 ? `
+                        <div class="digest-emails">
+                            ${digest.recent_24h.items.slice(0, 5).map(item => `
+                                <div class="digest-email" onclick="viewEmail(${item.email_id})">
+                                    <span class="digest-email-subject">${escapeHtml(item.subject)}</span>
+                                    <span class="digest-email-from">${escapeHtml(item.from)}</span>
+                                </div>
+                            `).join('')}
+                        </div>
+                    ` : ''}
+                </div>
+            ` : ''}
+            
+            ${digest.needs_reply && digest.needs_reply.count > 0 ? `
+                <div class="digest-section digest-needs-reply">
+                    <div class="digest-section-header">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+                        </svg>
+                        Needs Reply (${digest.needs_reply.count})
+                    </div>
+                    <div class="digest-text">${escapeHtml(digest.needs_reply.overview)}</div>
+                    ${digest.needs_reply.items && digest.needs_reply.items.length > 0 ? `
+                        <div class="digest-emails">
+                            ${digest.needs_reply.items.slice(0, 5).map(item => `
+                                <div class="digest-email" onclick="viewEmail(${item.email_id})">
+                                    <span class="digest-email-subject">${escapeHtml(item.subject)}</span>
+                                    <span class="digest-email-from">${escapeHtml(item.from)}</span>
+                                </div>
+                            `).join('')}
+                        </div>
+                    ` : ''}
+                </div>
+            ` : ''}
+            
+            ${(!digest.recent_24h || digest.recent_24h.count === 0) && (!digest.needs_reply || digest.needs_reply.count === 0) ? `
+                <div class="digest-empty">
+                    <div>All caught up! No new emails or pending replies.</div>
+                </div>
+            ` : ''}
+        `;
+        
+        showNotification('success', 'Daily summary refreshed!');
+        
+    } catch (error) {
+        console.error('Failed to refresh daily summary:', error);
+        content.innerHTML = `<div class="summary-error">Failed to refresh summary. Please try again.</div>`;
+        showNotification('error', 'Failed to refresh summary');
+    } finally {
+        if (button) {
+            button.classList.remove('spinning');
+        }
+    }
+}
+
 async function loadInbox(filter = null, page = 0) {
     isSpamView = false;
     currentFilter = filter;
@@ -110,6 +306,31 @@ async function loadInbox(filter = null, page = 0) {
                 <div class="empty-description">Please try again later</div>
             </div>
         `;
+    }
+}
+
+// Load essential tab (agent-selected important emails)
+async function loadEssential(element) {
+    // Update active nav item
+    document.querySelectorAll('.nav-item').forEach(item => item.classList.remove('active'));
+    element.classList.add('active');
+    isSpamView = false;
+    currentFilter = 'essential';
+    try {
+        const response = await fetch(`/api/essential?limit=${pageSize}`);
+        if (response.status === 401) {
+            window.location.href = '/login';
+            return;
+        }
+        const data = await response.json();
+        const emails = data.emails || [];
+        totalEmails = emails.length;
+        allEmails = emails;
+        displayEmails(emails);
+        renderPagination(0, 1); // simple single page view for essential
+    } catch (error) {
+        console.error('Failed to load essential emails:', error);
+        showNotification('error', 'Failed to load essential emails');
     }
 }
 
@@ -313,6 +534,7 @@ function displayEmails(emails) {
     container.innerHTML = emails.map(email => {
         const priority = email.classification?.priority || 'normal';
         const isSpam = email.classification?.is_spam || false;
+        const isSent = email.classification?.is_sent || false;
         const needsReply = email.needs_reply || false;  // Use computed needs_reply from backend
         const isRead = email.is_read || false;
         const isReplied = email.replied_at !== null;
@@ -320,25 +542,29 @@ function displayEmails(emails) {
         const unreadClass = isRead ? '' : 'unread';
         
         return `
-            <div class="email-item ${unreadClass}" onclick="viewEmail(${email.id})">
-                <div class="priority-indicator ${priority}"></div>
-                <div class="email-header">
-                    <div class="email-from">
-                        ${!isRead ? '<span class="unread-dot">●</span> ' : ''}
-                        ${isReplied ? '<span class="replied-badge">↩</span> ' : ''}
-                        ${escapeHtml(email.from)}
+            <div class="email-item-compact ${unreadClass}" onclick="viewEmail(${email.id})">
+                <div class="priority-indicator ${isSent ? 'sent' : priority}"></div>
+                <div class="email-compact-content">
+                    <div class="email-compact-left">
+                        <div class="email-from-compact">
+                            ${!isRead ? '<span class="unread-dot">●</span> ' : ''}
+                            ${isReplied ? '<span class="replied-badge">↩</span> ' : ''}
+                            ${isSent ? '<span class="sent-badge">→</span> ' : ''}
+                            ${escapeHtml(email.from)}
+                        </div>
+                        <div class="email-subject-compact">${escapeHtml(email.subject)}</div>
                     </div>
-                    <div class="email-time">${timeAgo}</div>
+                    <div class="email-compact-right">
+                        <div class="email-time">${timeAgo}</div>
+                        ${email.classification ? `
+                            <div class="email-badges-compact">
+                                ${isSent ? '<span class="badge-mini badge-sent">sent</span>' : ''}
+                                ${!isSent && needsReply ? '<span class="badge-mini badge-needs-reply">reply</span>' : ''}
+                                ${!isSent && priority === 'high' ? '<span class="badge-mini badge-high">high</span>' : ''}
+                            </div>
+                        ` : ''}
+                    </div>
                 </div>
-                <div class="email-subject">${escapeHtml(email.subject)}</div>
-                <div class="email-snippet">${escapeHtml(email.snippet)}</div>
-                ${email.classification ? `
-                    <div class="email-badges">
-                        <span class="badge badge-${priority}">${priority}</span>
-                        ${isSpam ? '<span class="badge badge-spam">spam</span>' : ''}
-                        ${needsReply ? '<span class="badge badge-needs-reply">needs reply</span>' : ''}
-                    </div>
-                ` : ''}
             </div>
         `;
     }).join('');
@@ -367,6 +593,13 @@ function searchEmails() {
     displayEmails(filtered);
 }
 
+function closeRightPanel() {
+    const panel = document.getElementById('rightPanel');
+    const container = document.querySelector('.container');
+    if (panel) panel.classList.remove('active');
+    if (container) container.classList.remove('panel-open');
+}
+
 async function viewEmail(emailId) {
     try {
         const response = await fetch(`/api/email/${emailId}`);
@@ -375,108 +608,109 @@ async function viewEmail(emailId) {
             return;
         }
         const data = await response.json();
-        
         const email = data.email;
         const drafts = data.drafts;
         const summary = data.summary;
-        
+
         // Mark email as read when opened
         if (!email.is_read) {
             markAsRead(emailId);
         }
-        
-        const modal = document.createElement('div');
-        modal.className = 'modal-overlay';
-        modal.onclick = (e) => {
-            if (e.target === modal) {
-                document.body.removeChild(modal);
-            }
-        };
-        
-        modal.innerHTML = `
-            <div class="modal">
-                <div class="modal-header">
-                    <div class="modal-title">${escapeHtml(email.subject)}</div>
-                    <button class="modal-close" onclick="document.body.removeChild(this.closest('.modal-overlay'))">✕</button>
+
+        // Render into right-side panel and push layout
+        const panel = document.getElementById('rightPanel');
+        const container = document.querySelector('.container');
+        if (container && !container.classList.contains('panel-open')) container.classList.add('panel-open');
+        if (panel) panel.classList.add('active');
+
+        panel.innerHTML = `
+            <div class="panel-header">
+                <div class="panel-title">${escapeHtml(email.subject)}</div>
+                <button class="panel-close" onclick="closeRightPanel()">✕</button>
+            </div>
+            <div class="panel-body">
+                ${data.thread_count > 0 ? `
+                    <div class="thread-indicator">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+                        </svg>
+                        Part of a thread (${data.thread_count + 1} message${data.thread_count > 0 ? 's' : ''})
+                    </div>
+                ` : ''}
+                <div class="email-detail-header">
+                    <div class="email-detail-meta">
+                        <div class="meta-row">
+                            <span class="meta-label">From:</span>
+                            <span class="meta-value">${escapeHtml(email.from)}</span>
+                        </div>
+                        <div class="meta-row">
+                            <span class="meta-label">To:</span>
+                            <span class="meta-value">${escapeHtml(email.to)}</span>
+                        </div>
+                        <div class="meta-row">
+                            <span class="meta-label">Date:</span>
+                            <span class="meta-value">${new Date(email.received_at).toLocaleString()}</span>
+                        </div>
+                    </div>
                 </div>
-                <div class="modal-body">
-                    <div class="email-detail-header">
-                        <div class="email-detail-meta">
-                            <div class="meta-row">
-                                <span class="meta-label">From:</span>
-                                <span class="meta-value">${escapeHtml(email.from)}</span>
-                            </div>
-                            <div class="meta-row">
-                                <span class="meta-label">To:</span>
-                                <span class="meta-value">${escapeHtml(email.to)}</span>
-                            </div>
-                            <div class="meta-row">
-                                <span class="meta-label">Date:</span>
-                                <span class="meta-value">${new Date(email.received_at).toLocaleString()}</span>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    ${summary ? `
-                        <div class="section">
-                            <div class="section-title">AI Summary</div>
-                            <div class="summary-box">${escapeHtml(summary.summary)}</div>
-                        </div>
-                    ` : ''}
-                    
+                ${summary ? `
                     <div class="section">
-                        <div class="section-title">Email Content</div>
-                        <div class="summary-box">${escapeHtml(email.snippet)}</div>
+                        <div class="section-title">AI Summary</div>
+                        <div class="summary-box">${escapeHtml(summary.summary)}</div>
                     </div>
-                    
+                ` : ''}
+                <div class="section">
+                    <div class="section-title">Email Content</div>
+                    <div class="summary-box">${escapeHtml(email.snippet)}</div>
+                </div>
+                ${data.thread_emails && data.thread_emails.length > 0 ? `
                     <div class="section">
-                        <div class="section-title">Actions</div>
-                        <div class="email-actions-grid">
-                            <button class="btn btn-primary" onclick='showComposeModal(${JSON.stringify(email).replace(/'/g, "&apos;")}, false)'>
-                                Reply
-                            </button>
-                            <button class="btn" onclick='showComposeModal(${JSON.stringify(email).replace(/'/g, "&apos;")}, true)'>
-                                Forward
-                            </button>
-                            <button class="btn" onclick="archiveEmail(${email.id})">
-                                Archive
-                            </button>
-                            <button class="btn" onclick="deleteEmail(${email.id})">
-                                Delete
-                            </button>
-                        </div>
-                    </div>
-                    
-                    <div class="section">
-                        <div class="section-title">Reply Drafts</div>
-                        <div id="drafts-section-${email.id}">
-                            ${drafts.length > 0 ? `
-                                ${drafts.map((draft, idx) => `
-                                    <div class="draft">
-                                        <div class="draft-text">${escapeHtml(draft.draft_text)}</div>
-                                        <div class="draft-actions">
-                                            <button class="btn btn-primary" onclick="approveDraft(${draft.id})">
-                                                Send Reply
-                                            </button>
-                                            <button class="btn">Edit</button>
-                                        </div>
+                        <div class="section-title">Thread Messages (${data.thread_emails.length})</div>
+                        <div class="thread-emails">
+                            ${data.thread_emails.map(threadEmail => `
+                                <div class="thread-email" onclick="viewEmail(${threadEmail.id})">
+                                    <div class="thread-email-header">
+                                        <span class="thread-email-from">${escapeHtml(threadEmail.from)}</span>
+                                        <span class="thread-email-time">${formatTimeAgo(threadEmail.received_at)}</span>
                                     </div>
-                                `).join('')}
-                            ` : `
-                                <div class="no-drafts">
-                                    <p>No draft replies generated yet.</p>
-                                    <button class="btn btn-primary" onclick="generateDrafts(${email.id})">
-                                        Generate Draft Replies
-                                    </button>
+                                    <div class="thread-email-subject">${escapeHtml(threadEmail.subject)}</div>
                                 </div>
-                            `}
+                            `).join('')}
                         </div>
+                    </div>
+                ` : ''}
+                <div class="section">
+                    <div class="section-title">Actions</div>
+                    <div class="email-actions-grid">
+                        <button class="btn btn-primary" onclick='openComposePanel(${JSON.stringify(email).replace(/'/g, "&apos;")}, false)'>Reply</button>
+                        <button class="btn" onclick='openComposePanel(${JSON.stringify(email).replace(/'/g, "&apos;")}, true)'>Forward</button>
+                        <button class="btn" onclick="archiveEmail(${email.id})">Archive</button>
+                        <button class="btn" onclick="deleteEmail(${email.id})">Delete</button>
+                    </div>
+                </div>
+                <div class="section">
+                    <div class="section-title">Reply Drafts</div>
+                    <div id="drafts-section-${email.id}">
+                        ${drafts.length > 0 ? `
+                            ${drafts.map((draft, idx) => `
+                                <div class="draft">
+                                    <div class="draft-text">${escapeHtml(draft.draft_text)}</div>
+                                    <div class="draft-actions">
+                                        <button class="btn btn-primary" onclick="approveDraft(${draft.id})">Send Reply</button>
+                                        <button class="btn">Edit</button>
+                                    </div>
+                                </div>
+                            `).join('')}
+                        ` : `
+                            <div class="no-drafts">
+                                <p>No draft replies generated yet.</p>
+                                <button class="btn btn-primary" onclick="generateDrafts(${email.id})">Generate Draft Replies</button>
+                            </div>
+                        `}
                     </div>
                 </div>
             </div>
         `;
-        
-        document.body.appendChild(modal);
     } catch (error) {
         alert('Failed to load email details');
     }
@@ -793,6 +1027,11 @@ function composeEmail() {
     showComposeModal();
 }
 
+// Alias for compatibility
+function openComposePanel(email = null, isForward = false) {
+    showComposeModal(email, isForward);
+}
+
 // Load drafts tab
 async function loadDrafts(element) {
     // Update active nav item
@@ -886,15 +1125,18 @@ async function checkBackgroundProcessing() {
         const response = await fetch('/api/background-status');
         if (response.ok) {
             const status = await response.json();
+            lastBackgroundStatus = status;
             if (status.is_processing) {
                 console.log(`Background processing: ${status.processed}/${status.total} emails`);
                 showBackgroundStatus(status);
                 startBackgroundPolling();
             }
+            return status;
         }
     } catch (error) {
         console.log('Background status check failed (may not be authenticated yet)');
     }
+    return null;
 }
 
 function startBackgroundPolling() {
@@ -922,6 +1164,7 @@ function startBackgroundPolling() {
                 } else {
                     // Processing complete
                     console.log('Background processing complete!');
+                    lastBackgroundStatus = null;
                     hideBackgroundStatus();
                     clearInterval(backgroundCheckInterval);
                     backgroundCheckInterval = null;
@@ -946,17 +1189,35 @@ function showBackgroundStatus(status) {
         indicator.id = 'backgroundIndicator';
         indicator.className = 'background-indicator';
         indicator.onclick = toggleBackgroundDetails;
+        indicator.title = 'Processing emails - Click for details';
         document.body.appendChild(indicator);
     }
     
-    const percent = Math.round((status.processed / status.total) * 100);
+    lastBackgroundStatus = status;
+    const total = Math.max(0, Number(status.total || 0));
+    const processed = Math.max(0, Math.min(total, Number(status.processed || 0)));
+    const percent = total > 0 ? Math.round((processed / total) * 100) : 0;
+    const clamped = Math.max(0, Math.min(100, percent));
     
-    // Compact view (always visible) - circular progress ring
+    // Calculate stroke offset for circular progress
+    // Circle circumference = 2 * PI * r = 2 * 3.14159 * 14 = 87.96
+    const radius = 14;
+    const circumference = 2 * Math.PI * radius;
+    const offset = circumference - (circumference * clamped) / 100;
+    
+    // Update title to show progress
+    indicator.title = `Processing: ${processed}/${total} emails (${clamped}%) - Click for details`;
+    
+    // Compact view (always visible) - clean circular progress ring with grey background and blue fill
     indicator.innerHTML = `
-        <svg class="progress-ring" width="32" height="32">
-            <circle class="progress-ring-circle-bg" cx="16" cy="16" r="14"></circle>
-            <circle class="progress-ring-circle" cx="16" cy="16" r="14" 
-                    style="stroke-dashoffset: ${88 - (88 * percent) / 100}"></circle>
+        <svg class="progress-ring" width="36" height="36" viewBox="0 0 36 36">
+            <circle cx="18" cy="18" r="${radius}" fill="none" stroke="#2a2a2a" stroke-width="2.5"></circle>
+            <circle cx="18" cy="18" r="${radius}" fill="none" stroke="#3b82f6" stroke-width="2.5" 
+                    stroke-dasharray="${circumference}" 
+                    stroke-dashoffset="${offset}" 
+                    stroke-linecap="round"
+                    transform="rotate(-90 18 18)"
+                    style="transition: stroke-dashoffset 0.5s ease;"></circle>
         </svg>
     `;
     
@@ -981,13 +1242,19 @@ function toggleBackgroundDetails() {
         details.classList.remove('visible');
     } else {
         details.classList.add('visible');
-        // Try to update with current status, or show idle state
-        checkBackgroundProcessing().then(() => {
-            // Status will be updated by the check
-        }).catch(() => {
-            // No background processing - show idle state with reclassify button
-            showIdleBackgroundDetails();
-        });
+        // If we already have a status, render immediately
+        if (lastBackgroundStatus && lastBackgroundStatus.is_processing) {
+            updateBackgroundDetails(lastBackgroundStatus);
+        } else {
+            // Try to fetch status, else show idle
+            checkBackgroundProcessing().then(() => {
+                if (!(lastBackgroundStatus && lastBackgroundStatus.is_processing)) {
+                    showIdleBackgroundDetails();
+                }
+            }).catch(() => {
+                showIdleBackgroundDetails();
+            });
+        }
         
         // Also show idle state immediately if no processing
         const indicator = document.getElementById('backgroundIndicator');
@@ -1005,15 +1272,23 @@ function showPermanentIndicator() {
         indicator.id = 'backgroundIndicator';
         indicator.className = 'background-indicator';
         indicator.onclick = toggleBackgroundDetails;
-        indicator.title = 'Click for email actions';
+        indicator.title = 'All synced - Click to control email processing';
         document.body.appendChild(indicator);
     }
     
-    // Show a static icon (gear/settings icon) when idle
+    // Show a full blue circle when synced (100% complete)
+    const radius = 14;
+    const circumference = 2 * Math.PI * radius;
+    
     indicator.innerHTML = `
-        <svg class="settings-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="12" cy="12" r="3"></circle>
-            <path d="M12 1v6m0 6v6m-9-9h6m6 0h6m-4.5-7.5l-3 3m-6 0l-3 3m0 9l3-3m9 0l3 3"></path>
+        <svg class="progress-ring" width="36" height="36" viewBox="0 0 36 36">
+            <circle cx="18" cy="18" r="${radius}" fill="none" stroke="#2a2a2a" stroke-width="2.5"></circle>
+            <circle cx="18" cy="18" r="${radius}" fill="none" stroke="#3b82f6" stroke-width="2.5" 
+                    stroke-dasharray="${circumference}" 
+                    stroke-dashoffset="0" 
+                    stroke-linecap="round"
+                    transform="rotate(-90 18 18)"
+                    style="transition: stroke-dashoffset 0.5s ease;"></circle>
         </svg>
     `;
 }
@@ -1024,20 +1299,23 @@ function showIdleBackgroundDetails() {
     
     details.innerHTML = `
         <div class="details-header">
-            <div class="details-title">Email Actions</div>
+            <div class="details-title">Email Processing</div>
             <button class="details-close" onclick="toggleBackgroundDetails()">×</button>
         </div>
         <div class="details-content">
-            <div class="details-info">
-                Quick actions for managing your emails.
+            <div class="details-info" style="margin-bottom: 16px;">
+                No processing currently active
             </div>
-            <div style="margin-top: 16px; display: flex; flex-direction: column; gap: 8px;">
-                <button class="btn btn-primary" onclick="reclassifyAllEmails()" style="width: 100%;">
-                    ⚡ Reclassify All Emails
+            <div class="details-progress-bar" style="margin-bottom: 16px;">
+                <div class="details-progress-fill" style="width: 0%"></div>
+            </div>
+            <div style="display: flex; flex-direction: column; gap: 12px;">
+                <button class="btn btn-primary" onclick="startProcessing()" style="width: 100%; font-size: 14px; padding: 12px;">
+                    🔄 Sync & Process
                 </button>
-                <div style="font-size: 12px; color: var(--text-secondary); margin-top: 8px; line-height: 1.5;">
-                    Reclassify all emails with updated aggressive spam detection rules. This will move promotional and fundraising emails to spam.
-                </div>
+                <button class="btn btn-secondary" onclick="resetProcessing()" style="width: 100%; font-size: 14px; padding: 12px;">
+                    ↻ Reset All
+                </button>
             </div>
         </div>
     `;
@@ -1049,39 +1327,89 @@ function updateBackgroundDetails(status) {
     
     const percent = Math.round((status.processed / status.total) * 100);
     const remaining = status.total - status.processed;
-    const estimatedTime = Math.round(remaining * 2 / 60); // ~2 sec per email, convert to minutes
     
     details.innerHTML = `
         <div class="details-header">
-            <div class="details-title">Background Processing</div>
+            <div class="details-title">Email Processing</div>
             <button class="details-close" onclick="toggleBackgroundDetails()">×</button>
         </div>
         <div class="details-content">
-            <div class="details-stat">
-                <div class="details-label">Progress</div>
-                <div class="details-value">${status.processed} / ${status.total} emails</div>
+            <div class="details-info" style="margin-bottom: 16px;">
+                Processing ${status.processed} / ${status.total} emails (${percent}%)
             </div>
-            <div class="details-progress-bar">
+            <div class="details-progress-bar" style="margin-bottom: 16px;">
                 <div class="details-progress-fill" style="width: ${percent}%"></div>
             </div>
-            <div class="details-percent">${percent}%</div>
-            <div class="details-stat">
-                <div class="details-label">Remaining</div>
-                <div class="details-value">${remaining} emails (~${estimatedTime} min)</div>
-            </div>
-            <div class="details-info">
-                Your inbox is being processed in the background. New emails will appear automatically as they're ready.
-            </div>
-            <div style="margin-top: 16px; display: flex; flex-direction: column; gap: 8px;">
-                <button class="btn" onclick="cancelBackgroundSync()" style="width: 100%;">
-                    Cancel Sync
+            <div style="display: flex; flex-direction: column; gap: 12px;">
+                <button class="btn btn-primary" onclick="stopProcessing()" style="width: 100%; font-size: 14px; padding: 12px;">
+                    ⏸ Cancel Sync
                 </button>
-                <button class="btn btn-secondary" onclick="reclassifyAllEmails()" style="width: 100%;">
-                    ⚡ Reclassify All Emails
+                <button class="btn btn-secondary" onclick="resetProcessing()" style="width: 100%; font-size: 14px; padding: 12px;">
+                    ↻ Reset All
                 </button>
             </div>
         </div>
     `;
+}
+
+async function startProcessing() {
+    try {
+        // Start processing by polling for new emails
+        showNotification('info', 'Starting email processing...');
+        await pollEmails();
+        toggleBackgroundDetails(); // Close the details panel
+    } catch (error) {
+        console.error('Start processing error:', error);
+        showNotification('error', 'Failed to start processing');
+    }
+}
+
+async function stopProcessing() {
+    try {
+        const response = await fetch('/api/cancel-sync', { method: 'POST' });
+        
+        if (response.status === 401) {
+            window.location.href = '/login';
+            return;
+        }
+        
+        if (response.ok) {
+            showNotification('info', 'Processing stopped');
+            stopBackgroundPolling();
+            toggleBackgroundDetails(); // Close the details panel
+        } else {
+            showNotification('error', 'Failed to stop processing');
+        }
+    } catch (error) {
+        console.error('Stop processing error:', error);
+        showNotification('error', 'Failed to stop processing');
+    }
+}
+
+async function resetProcessing() {
+    // Show confirmation dialog
+    showConfirmDialog(
+        'Reset & Restart Processing',
+        'This will reclassify all emails and restart processing from scratch. This may take several minutes. Continue?',
+        async () => {
+            try {
+                showNotification('info', 'Resetting and restarting processing...');
+                
+                // First, reclassify all emails
+                await performReclassification();
+                
+                // Then start processing
+                setTimeout(async () => {
+                    await pollEmails();
+                    toggleBackgroundDetails();
+                    showNotification('success', 'Processing restarted successfully');
+                }, 2000);
+            } catch (error) {
+                console.error('Reset processing error:', error);
+                showNotification('error', 'Failed to reset processing');
+            }
+        }
+    );
 }
 
 async function cancelBackgroundSync() {
@@ -1117,20 +1445,21 @@ function hideBackgroundStatus() {
     const indicator = document.getElementById('backgroundIndicator');
     const details = document.getElementById('backgroundDetails');
     
-    if (indicator) {
-        indicator.style.opacity = '0';
-        setTimeout(() => indicator.remove(), 300);
-    }
-    
     if (details) {
         details.classList.remove('visible');
         setTimeout(() => details.remove(), 300);
     }
+
+    // Smoothly transition to synced state (full blue circle) instead of removing
+    setTimeout(() => {
+        showPermanentIndicator();
+    }, 100);
 }
 
 // Current draft state
 let currentDraftId = null;
 let draftAutoSaveTimer = null;
+let currentAttachments = []; // Store selected attachments
 
 // Show compose email modal
 async function showComposeModal(replyTo = null, forward = false, draftId = null) {
@@ -1139,6 +1468,9 @@ async function showComposeModal(replyTo = null, forward = false, draftId = null)
     const existingPanel = document.querySelector('.compose-modal');
     if (existingOverlay) existingOverlay.remove();
     if (existingPanel) existingPanel.remove();
+    
+    // Reset attachments for new compose
+    currentAttachments = [];
     
     const isReply = replyTo !== null;
     const title = forward ? 'Forward Email' : (isReply ? 'Reply to Email' : 'Compose Email');
@@ -1196,6 +1528,14 @@ async function showComposeModal(replyTo = null, forward = false, draftId = null)
                     <label>Message:</label>
                     <textarea id="composeBody" name="body" rows="15" required>${draftData ? draftData.body : ''}</textarea>
                 </div>
+                <div class="compose-field">
+                    <label>Attachments:</label>
+                    <div id="attachmentList" style="display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px;"></div>
+                    <input type="file" id="attachmentInput" multiple style="display: none;" onchange="handleAttachmentSelect(event)" />
+                    <button type="button" class="btn" onclick="document.getElementById('attachmentInput').click()">
+                        📎 Add Attachments
+                    </button>
+                </div>
                 <div class="compose-actions">
                     <button type="submit" class="btn btn-primary">Send</button>
                     <button type="button" class="btn" onclick="closeDraftModal()">Cancel</button>
@@ -1239,6 +1579,7 @@ function closeDraftModal() {
     
     // Clear state
     currentDraftId = null;
+    currentAttachments = [];
     if (draftAutoSaveTimer) {
         clearTimeout(draftAutoSaveTimer);
         draftAutoSaveTimer = null;
@@ -1721,5 +2062,169 @@ function confirmDialogAction() {
     closeConfirmDialog();
     if (callback) {
         callback();
+    }
+}
+
+// Attachment handling functions
+function handleAttachmentSelect(event) {
+    const files = event.target.files;
+    if (!files || files.length === 0) return;
+    
+    // Add files to currentAttachments array
+    for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        
+        // Check file size (max 25MB)
+        if (file.size > 25 * 1024 * 1024) {
+            showNotification('error', `File ${file.name} is too large (max 25MB)`);
+            continue;
+        }
+        
+        currentAttachments.push({
+            file: file,
+            name: file.name,
+            size: file.size,
+            type: file.type || 'application/octet-stream'
+        });
+    }
+    
+    // Update attachment list UI
+    updateAttachmentList();
+    
+    // Clear file input for next selection
+    event.target.value = '';
+}
+
+function updateAttachmentList() {
+    const listContainer = document.getElementById('attachmentList');
+    if (!listContainer) return;
+    
+    if (currentAttachments.length === 0) {
+        listContainer.innerHTML = '';
+        return;
+    }
+    
+    listContainer.innerHTML = currentAttachments.map((att, index) => {
+        const sizeMB = (att.size / (1024 * 1024)).toFixed(2);
+        const icon = getFileIcon(att.type, att.name);
+        const isViewable = att.type.startsWith('image/') || att.type.startsWith('video/') || att.type.startsWith('audio/');
+        
+        return `
+            <div class="attachment-item" style="display: flex; align-items: center; gap: 12px; padding: 8px 12px; background: var(--bg-tertiary); border-radius: 6px; border: 1px solid var(--border);" onclick="${isViewable ? `viewAttachment(currentAttachments[${index}])` : ''}">
+                <span style="font-size: 20px;">${icon}</span>
+                <div style="flex: 1; min-width: 0;">
+                    <div style="font-size: 14px; color: var(--text-primary); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                        ${escapeHtml(att.name)}
+                        ${isViewable ? '<span style="font-size: 11px; color: var(--accent); margin-left: 8px;">Click to preview</span>' : ''}
+                    </div>
+                    <div style="font-size: 12px; color: var(--text-secondary);">
+                        ${sizeMB} MB
+                    </div>
+                </div>
+                <button type="button" class="btn" style="padding: 4px 8px; font-size: 12px;" onclick="event.stopPropagation(); removeAttachment(${index})">
+                    ✕
+                </button>
+            </div>
+        `;
+    }).join('');
+}
+
+function removeAttachment(index) {
+    currentAttachments.splice(index, 1);
+    updateAttachmentList();
+}
+
+function getFileIcon(mimeType, filename) {
+    // Get file extension
+    const ext = filename.split('.').pop().toLowerCase();
+    
+    // Check MIME type or extension
+    if (mimeType.startsWith('image/') || ['jpg', 'jpeg', 'png', 'gif', 'svg', 'webp'].includes(ext)) {
+        return '🖼️';
+    } else if (mimeType.startsWith('video/') || ['mp4', 'mov', 'avi', 'mkv', 'webm'].includes(ext)) {
+        return '🎥';
+    } else if (mimeType.startsWith('audio/') || ['mp3', 'wav', 'ogg', 'flac', 'm4a'].includes(ext)) {
+        return '🎵';
+    } else if (mimeType.includes('pdf') || ext === 'pdf') {
+        return '📄';
+    } else if (mimeType.includes('word') || ['doc', 'docx'].includes(ext)) {
+        return '📝';
+    } else if (mimeType.includes('excel') || mimeType.includes('spreadsheet') || ['xls', 'xlsx', 'csv'].includes(ext)) {
+        return '📊';
+    } else if (mimeType.includes('presentation') || ['ppt', 'pptx'].includes(ext)) {
+        return '📽️';
+    } else if (mimeType.includes('zip') || mimeType.includes('compressed') || ['zip', 'rar', '7z', 'tar', 'gz'].includes(ext)) {
+        return '📦';
+    } else if (mimeType.includes('text/') || ['txt', 'md', 'log'].includes(ext)) {
+        return '📃';
+    }
+    
+    return '📎'; // Default attachment icon
+}
+
+function viewAttachment(attachment) {
+    const mimeType = attachment.type;
+    const ext = attachment.name.split('.').pop().toLowerCase();
+    
+    // Check if it's a viewable media type
+    const isImage = mimeType.startsWith('image/') || ['jpg', 'jpeg', 'png', 'gif', 'svg', 'webp'].includes(ext);
+    const isVideo = mimeType.startsWith('video/') || ['mp4', 'mov', 'webm'].includes(ext);
+    const isAudio = mimeType.startsWith('audio/') || ['mp3', 'wav', 'ogg', 'm4a'].includes(ext);
+    
+    if (!isImage && !isVideo && !isAudio) {
+        showNotification('info', 'This file type cannot be previewed. It will be sent as an attachment.');
+        return;
+    }
+    
+    // Create viewer modal
+    const viewer = document.createElement('div');
+    viewer.className = 'attachment-viewer-modal';
+    viewer.onclick = (e) => {
+        if (e.target === viewer) {
+            closeAttachmentViewer();
+        }
+    };
+    
+    const content = document.createElement('div');
+    content.className = 'attachment-viewer-content';
+    
+    // Create file URL from File object
+    const fileURL = URL.createObjectURL(attachment.file);
+    
+    if (isImage) {
+        content.innerHTML = `<img src="${fileURL}" alt="${escapeHtml(attachment.name)}" />`;
+    } else if (isVideo) {
+        content.innerHTML = `<video src="${fileURL}" controls autoplay style="max-width: 100%; max-height: 90vh;"></video>`;
+    } else if (isAudio) {
+        content.innerHTML = `<audio src="${fileURL}" controls autoplay style="width: 500px; max-width: 90vw;"></audio>`;
+    }
+    
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'attachment-viewer-close';
+    closeBtn.innerHTML = '×';
+    closeBtn.onclick = closeAttachmentViewer;
+    
+    viewer.appendChild(content);
+    viewer.appendChild(closeBtn);
+    document.body.appendChild(viewer);
+    
+    // Trigger animation
+    setTimeout(() => {
+        viewer.classList.add('active');
+    }, 10);
+}
+
+function closeAttachmentViewer() {
+    const viewer = document.querySelector('.attachment-viewer-modal');
+    if (viewer) {
+        viewer.classList.remove('active');
+        setTimeout(() => {
+            // Clean up object URLs to prevent memory leaks
+            const media = viewer.querySelector('img, video, audio');
+            if (media && media.src) {
+                URL.revokeObjectURL(media.src);
+            }
+            viewer.remove();
+        }, 300);
     }
 }

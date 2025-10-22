@@ -2,8 +2,8 @@ import logging
 from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 from sqlalchemy import and_
-from .models import Email, Inference, Draft
-from .llm import classify_email, summarize_email, draft_reply
+from .models import Email, Inference, Draft, DailyDigest, User
+from .llm import classify_email, summarize_email, draft_reply, agent_route, daily_digest_summarize, rank_emails
 from .utils import classify_with_rules_and_llm
 from .config import settings
 
@@ -55,11 +55,15 @@ def process_email(db: Session, email: Email, classify_only: bool = False) -> boo
         # Step 1: Classify email using heuristics first, then LLM fallback (skip if cached)
         if not existing_classification:
             logger.info(f"Classifying email {email.id}: {email.subject}")
+            # Get user for sent email detection
+            user = db.query(User).filter(User.id == email.user_id).first() if email.user_id else None
+            
             # Fast-path: rules first, then LLM only if needed
             classification = classify_with_rules_and_llm(
                 db=db,
                 email=email,
-                llm_classify_func=lambda subject, body: classify_email(subject, body, headers={})
+                llm_classify_func=lambda subject, body: classify_email(subject, body, headers={}),
+                user=user
             )
             
             # Save classification
@@ -324,6 +328,144 @@ def summarize_pending_emails(db: Session, max_emails: int = None) -> int:
             db.rollback()
     logger.info(f"Background summarized {count} emails")
     return count
+
+
+def build_daily_digest(db: Session, user_id: int, digest_date):
+    """Run the AI agent to produce a daily digest for a user and date.
+    Separate sections: last 24 hours + unreplied emails needing response."""
+    import datetime as dt
+    from .utils import is_sent_by_user
+    
+    # Get user for filtering sent emails
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise ValueError(f"User {user_id} not found")
+    
+    now = dt.datetime.utcnow()
+    last_24h = now - dt.timedelta(hours=24)
+    
+    # Get emails from the last 24 hours (excluding sent emails)
+    recent_emails_raw = db.query(Email).filter(
+        Email.user_id == user_id,
+        Email.received_at >= last_24h
+    ).all()
+    
+    recent_emails = [e for e in recent_emails_raw if not is_sent_by_user(e, user)]
+    
+    # Get unreplied emails that need a reply (regardless of age, excluding sent and recent)
+    unreplied_emails = db.query(Email).filter(
+        Email.user_id == user_id,
+        Email.replied_at.is_(None)
+    ).all()
+    
+    # Filter for those that need a reply based on classification and aren't sent by user
+    unreplied_needing_response = []
+    recent_email_ids = {e.id for e in recent_emails}
+    
+    for e in unreplied_emails:
+        # Skip if sent by user
+        if is_sent_by_user(e, user):
+            continue
+        # Skip if already in recent emails (to avoid duplication)
+        if e.id in recent_email_ids:
+            continue
+        
+        cls = db.query(Inference).filter(
+            and_(Inference.email_id == e.id, Inference.kind == "classification")
+        ).order_by(Inference.created_at.desc()).first()
+        if cls and cls.json.get("action") == "needs_reply":
+            unreplied_needing_response.append(e)
+    
+    # Sort both lists
+    recent_emails.sort(key=lambda e: e.received_at or dt.datetime.min, reverse=True)
+    unreplied_needing_response.sort(key=lambda e: e.received_at or dt.datetime.min, reverse=True)
+
+    # Helper to create item from email
+    def email_to_item(e):
+        cls = db.query(Inference).filter(
+            and_(Inference.email_id == e.id, Inference.kind == "classification")
+        ).order_by(Inference.created_at.desc()).first()
+        summ = db.query(Inference).filter(
+            and_(Inference.email_id == e.id, Inference.kind == "summary")
+        ).order_by(Inference.created_at.desc()).first()
+        class_json = cls.json if cls else None
+        summ_json = summ.json if summ else None
+        link = f"/api/email/{e.id}"
+        return {
+            "email_id": e.id,
+            "subject": e.subject,
+            "from": e.from_addr,
+            "received_at": e.received_at.isoformat() if e.received_at else None,
+            "importance": (class_json or {}).get("priority"),
+            "action": (class_json or {}).get("action"),
+            "is_spam": (class_json or {}).get("is_spam", False),
+            "summary": (summ_json or {}).get("summary"),
+            "link": link
+        }
+    
+    # Create separate item lists
+    recent_items = [email_to_item(e) for e in recent_emails[:10]]  # Limit to 10 most recent
+    needs_reply_items = [email_to_item(e) for e in unreplied_needing_response[:10]]  # Limit to 10
+    
+    # Filter out spam from both
+    recent_items = [i for i in recent_items if not i.get("is_spam")]
+    needs_reply_items = [i for i in needs_reply_items if not i.get("is_spam")]
+    
+    # Basic stats
+    stats = {
+        "recent_count": len(recent_items),
+        "needs_reply_count": len(needs_reply_items),
+        "total": len(recent_items) + len(needs_reply_items)
+    }
+
+    # Generate summaries for both sections
+    recent_summary = None
+    needs_reply_summary = None
+    
+    if recent_items:
+        recent_summary = daily_digest_summarize({
+            "stats": {"count": len(recent_items)},
+            "top_items": recent_items,
+            "section": "recent_24h"
+        })
+    
+    if needs_reply_items:
+        needs_reply_summary = daily_digest_summarize({
+            "stats": {"count": len(needs_reply_items)},
+            "top_items": needs_reply_items,
+            "section": "needs_reply"
+        })
+
+    payload = {
+        "recent_24h": {
+            "overview": recent_summary.get("overview", "No new emails in the last 24 hours") if recent_summary else "No new emails in the last 24 hours",
+            "items": recent_items,
+            "count": len(recent_items)
+        },
+        "needs_reply": {
+            "overview": needs_reply_summary.get("overview", "No emails waiting for reply") if needs_reply_summary else "No emails waiting for reply",
+            "items": needs_reply_items,
+            "count": len(needs_reply_items)
+        },
+        "stats": stats
+    }
+
+    # Upsert DailyDigest
+    existing = db.query(DailyDigest).filter(
+        DailyDigest.user_id == user_id,
+        DailyDigest.digest_date == digest_date
+    ).first()
+    if existing:
+        existing.summary_json = payload
+        existing.updated_at = dt.datetime.utcnow()
+        db.commit()
+        return existing
+    else:
+        dd = DailyDigest(user_id=user_id, digest_date=digest_date, summary_json=payload)
+        db.add(dd)
+        db.commit()
+        db.refresh(dd)
+        return dd
 
 def get_email_with_inferences(db: Session, email_id: int) -> dict:
     """Get an email with all its inferences and drafts."""

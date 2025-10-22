@@ -32,6 +32,9 @@
                 <div class="nav-item active" onclick="filterEmails(null, this)">
                     <span>All Mail</span>
                 </div>
+                <div class="nav-item" onclick="loadEssential(this)">
+                    <span>Essential</span>
+                </div>
                 <div class="nav-item" onclick="filterEmails('needs_reply', this)">
                     <span>Needs Reply</span>
                 </div>
@@ -67,6 +70,31 @@
         </div>
         
         <div class="main">
+            <!-- Daily AI Summary Section -->
+            <div class="daily-summary-container" id="dailySummaryContainer" style="display: none;">
+                <div class="daily-summary">
+                    <div class="daily-summary-header">
+                        <div class="daily-summary-title">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path>
+                            </svg>
+                            Daily Summary
+                        </div>
+                        <button class="daily-summary-refresh" onclick="refreshDailySummary()" title="Refresh summary">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
+                            </svg>
+                        </button>
+                    </div>
+                    <div class="daily-summary-content" id="dailySummaryContent">
+                        <div class="loading">
+                            <div class="spinner"></div>
+                            <div>Generating daily summary...</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
             <div class="toolbar">
                 <div class="search-box">
                     <input type="text" class="search-input" placeholder="Search emails..." id="searchInput" onkeyup="searchEmails()">
@@ -80,6 +108,9 @@
                 </div>
             </div>
         </div>
+        
+        <!-- Right-side sliding panel for email detail and compose (pushes layout, no overlay) -->
+        <div id="rightPanel" class="right-panel" aria-live="polite"></div>
     </div>
     
     <script src="/static/app.js"></script>

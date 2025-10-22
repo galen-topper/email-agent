@@ -1,7 +1,7 @@
 .PHONY: setup dev test clean
 
 setup:
-	python3.11 -m venv .venv
+	python3 -m venv .venv
 	.venv/bin/pip install -r requirements.txt
 	@echo "Setup complete! Copy env.example to .env and configure your settings."
 
